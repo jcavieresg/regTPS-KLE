@@ -99,9 +99,9 @@ Type objective_function<Type>::operator() ()
   
   // Likelihood
   int n = y.size();	                 // number of observations 
-  vector<Type> eta = A_obs * u;
+  vector<Type> field_sp = A_obs * u;
   for(int i = 0; i < n; i++){
-    nll -= dnorm(y(i), eta(i), sigma, true);
+    nll -= dnorm(y(i), field_sp(i), sigma, true);
   }
 
   // Project to prediction grid
@@ -111,12 +111,13 @@ Type objective_function<Type>::operator() ()
   Type jnll = nll + nlp;
   
   
-  // Simulate data from eta
+  // Simulate data from field_sp
   vector<Type> y_sim(n);
   for( int i=0; i<n; i++){
     SIMULATE {
-      y_sim(i) = rnorm(eta(i), sigma);
-      REPORT(y_sim)};
+      y_sim(i) = rnorm(field_sp(i), sigma);
+      };
+    REPORT(y_sim);
   }
   
 
@@ -126,9 +127,12 @@ Type objective_function<Type>::operator() ()
   REPORT(kappa);
   REPORT(sigma_u);
   REPORT(rho);
+  REPORT(field_sp);
   REPORT(field_grid);
+  REPORT(Q);
   
   // ADREPORT
+  ADREPORT(field_sp);
   ADREPORT(field_grid);  // Enable posterior SD for uncertainty
   ADREPORT(sigma);
   ADREPORT(tau);

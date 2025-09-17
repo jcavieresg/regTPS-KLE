@@ -1,13 +1,11 @@
-setwd("C:/Users/cavieresgaet/Desktop/kle")
+setwd("C:/Users/Usuario/Desktop/KLE")
 rm(list = ls())
 
 options(scipen = 999)
-library(TMB)
-library(tmbstan)
-library(mgcv)
-library(MASS)
-library(INLA)
 
+library(pacman)
+pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
+               TMB, tmbstan, mgcv, MASS, INLA)
 
 
 # Calculate the number of cores
@@ -15,8 +13,8 @@ no_cores <- parallelly::availableCores() - 1
 
 #==================================
 # Compile the model and load it
-compile("kle_model_alpha_M_opt.cpp")
-dyn.load(dynlib("kle_model_alpha_M_opt"))
+compile("tps_kle.cpp", framework="TMBad")
+dyn.load(dynlib("tps_kle"))
 
 
 
@@ -25,19 +23,16 @@ dyn.load(dynlib("kle_model_alpha_M_opt"))
 #                Main function Regularized TPS Kernel for KLE
 #=====================================================================================
 
-run_tmb <- function(N_sp = N_sp, dim_grid = dim_grid, sp_points = sp_points, mesh = NULL){
+run_tmb_tps <- function(N_sp = N_sp, dim_grid = dim_grid, sp_points = sp_points,
+                        sigma0 = 0.1, nu = 1.5, rho = 0.2, sigma_u = 1.0, mesh = NULL){
 set.seed(1234)
 
 # Get triangle count from mesh
-# n_triangles <- nrow(mesh$graph$tv)
 n_nodes   <- mesh$n 
 N_sp <- N_sp
 k_basis <- floor(0.95 * N_sp)
-sigma0_error <- 0.1
 
-set.seed(1234)
-# sp_points <- data.frame(s1 = runif(N_sp), s2 = runif(N_sp))
-
+# Matern covariance function
 matern_cov <- function(coords, nu = 1.5, rho = 0.2, sigma2 = 1.0) {
   D <- as.matrix(dist(coords))
   D[D == 0] <- 1e-10
@@ -47,28 +42,37 @@ matern_cov <- function(coords, nu = 1.5, rho = 0.2, sigma2 = 1.0) {
   return(sigma2 * matern_part)
 }
 
-Cov_true_obs <- matern_cov(sp_points)
-true_field_obs <- mvrnorm(1, mu = rep(0, N_sp), Sigma = Cov_true_obs)
-y_obs <- true_field_obs + rnorm(N_sp, 0, sigma0_error)
+# Simulate latent field on the observation points
+Cov_sp <- matern_cov(sp_points, nu = nu, rho = rho, sigma2 = sigma_u^2)
+true_field_sp <- as.numeric(MASS::mvrnorm(1, mu = rep(0, N_sp), Sigma = Cov_sp))
+y_obs <- true_field_sp + rnorm(N_sp, 0, sigma0)  # observations with noise
 
-dim_grid <- dim_grid
+# Grid points
 s1_grid <- seq(0, 1, length.out = dim_grid)
 s2_grid <- seq(0, 1, length.out = dim_grid)
 grid_total <- expand.grid(s1 = s1_grid, s2 = s2_grid)
-
 
 # Simulate true GRF on grid (same kernel as for observations)
 Cov_true_grid <- matern_cov(grid_total)
 true_field_grid <- MASS::mvrnorm(1, mu = rep(0, nrow(grid_total)), Sigma = Cov_true_grid)
 
 
+
 #=====================================================================================
-# 3. Setup Basis and Penalty (Optimized for TMB)
+# Setup Basis and Penalty (Optimized for TMB)
 #=====================================================================================
 data_smooth <- data.frame(s1 = sp_points$s1, s2 = sp_points$s2, y_obs = y_obs)
 
-sm <- smoothCon(s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth, absorb.cons = FALSE)[[1]]
-gam_fit <- gam(y_obs ~ s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth)
+ sm <- smoothCon(s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth, absorb.cons = FALSE)[[1]]
+ gam_fit <- gam(y_obs ~ s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth)
+
+# kappa_gp <- sqrt(8 * nu) / rho # Convert rho to kappa for the 'gp' basis
+# sm <- smoothCon(s(s1, s2, k = k_basis, bs = "gp", m = c(nu, kappa_gp)),
+#                 data = data_smooth, absorb.cons = FALSE)[[1]]
+# 
+# # Note: The `gam_fit` and `predict` calls now use the `gp` basis as well.
+# gam_fit <- gam(y_obs ~ s(s1, s2, k = k_basis, bs = "gp", m = c(nu, kappa_gp)),
+#                data = data_smooth)
 
 # Get design matrices
 Phi_basis_sp <- predict(gam_fit, newdata = sp_points, type = "lpmatrix")
@@ -76,8 +80,8 @@ Phi_basis_grid <- predict(gam_fit, newdata = grid_total, type = "lpmatrix")
 n_basis_grid <- ncol(Phi_basis_grid)
 
 # Get penalty matrix S and its eigen-decomposition
-S_grid <- sm$S[[1]]
-S_eig <- eigen(S_grid, symmetric = TRUE)
+S <- sm$S[[1]]  #--> This is obtained from the sp_points!!
+S_eig <- eigen(S, symmetric = TRUE)
 S_diag <- S_eig$values
 evectors <- S_eig$vectors
 order_idx <- order(S_diag, decreasing = TRUE)
@@ -103,65 +107,39 @@ S_diag_truncated <- S_diag[1:M_truncation]
 
 cat(paste0("Pre-computed KLE basis matrices of size ", M_truncation, " columns.\n"))
 
-#=====================================================================================
-# 4. Prepare TMB input and run the optimized model
-#=====================================================================================
-tmb_data <- list(
-  y = y_obs,
-  Phi_kle_sp = Phi_kle_sp,
-  Phi_kle_grid = Phi_kle_grid,
-  S_diag_truncated = S_diag_truncated,
-  M_P_null_space = M_P_null_space
-)
 
-tmb_par <- list(
-  Z = rep(0, M_truncation),
-  logsigma = log(0.5),
-  logalpha = log(1.0)
-)
 
-obj <- MakeADFun(data = tmb_data, parameters = tmb_par,
-                           DLL = "kle_model_alpha_M_opt", random = "Z")
+#========================
+#       TMB data
+#========================
+tmb_data <- list(y_obs = y_obs,
+                 Phi_kle_sp = Phi_kle_sp,
+                 Phi_kle_grid = Phi_kle_grid,
+                 S_diag_truncated = S_diag_truncated,
+                 M_P_null_space = M_P_null_space)
+
+#========================
+#       TMB par
+#========================
+# Initial parameters for the optimizer
+logsigma_init <- log(sd(y_obs))
+logalpha_init <- log(var(y_obs) / mean(S_diag_truncated))
+
+tmb_par <- list(Z = rep(0, M_truncation),
+                logsigma = 0.1,
+                logalpha = 0.1)
+
+
+obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "tps_kle", random = "Z")
 
 # The optimization should now be significantly faster
 opt <- nlminb(obj$par, obj$fn, obj$gr)
 rep_tmb <- sdreport(obj)
-res_list = list(obj, opt, rep_tmb, tmb_data, tmb_par, M_truncation, n_nodes, true_field_grid)
+res_list = list(obj, opt, rep_tmb, tmb_data, tmb_par, M_truncation, n_nodes, true_field_grid,
+                true_field_sp)
 return(res_list)
 }
 
-
-
-# Base parameters
-# base_N_sp <- 50
-# scenarios <- list()
-# 
-# # Define custom max.edge values to control number of triangles
-# max_edge_list <- list(
-#   c(0.16, 0.4),  # Scenario 1 (~100 triangles)
-#   c(0.14, 0.35), # Scenario 2 (~130)
-#   c(0.12,  0.3),  # Scenario 3 (~160)
-#   c(0.11, 0.3)  # Scenario 4 (~200)
-# )
-# 
-# # Define corresponding cutoffs (optional: scale with edge)
-# cutoff_list <- c(0.05, 0.04, 0.03, 0.02)
-# 
-# for (i in 1:4) {
-#   N_sp <- base_N_sp * i
-#   sp_points <- data.frame(s1 = runif(N_sp), s2 = runif(N_sp))
-#   sp_matrix <- as.matrix(sp_points)
-#   
-#   # Use pre-tuned mesh parameters
-#   max_edge <- max_edge_list[[i]]
-#   cutoff <- cutoff_list[i]
-#   
-#   # Create the mesh
-#   mesh <- inla.mesh.2d(loc = sp_matrix, max.edge = max_edge, cutoff = cutoff, offset = c(0.05, 0.1))
-#   
-#   # Store results
-#   scenarios[[paste0("scenario", i)]] <- list(N_sp = N_sp, points = sp_points, mesh = mesh,
-#                                         n_triangles = nrow(mesh$graph$tv), n_vertices = mesh$n)}
 
 
 
@@ -170,25 +148,24 @@ return(res_list)
 #=====================================================================================
 
 mesh_scenarios <- function(base_N_sp = 50, n_scenarios = 4) {
+  set.seed(1234)  
   scenarios <- list()
   for (i in 1:n_scenarios) {
-    set.seed(i)
     N_sp <- base_N_sp * i
+    # Always consume RNG in sequence → identical results if re-run
     sp_points <- data.frame(s1 = runif(N_sp), s2 = runif(N_sp))
     sp_matrix <- as.matrix(sp_points)
     bound1 <- inla.nonconvex.hull(sp_matrix)
-    mesh <- inla.mesh.create(loc = sp_matrix, boundary = bound1, refine = FALSE, plot.delay = NULL)
-    
-    # Store the results for this scenario in the list
+    mesh <- inla.mesh.create(loc = sp_matrix, boundary = bound1,
+                             refine = FALSE, plot.delay = NULL)
     scenario_name <- paste0("scenario", i)
-    scenarios[[scenario_name]] <- list(N_sp = N_sp, sp_points = sp_points,
-      mesh = mesh, n_triangles = nrow(mesh$graph$tv), # Number of triangles in the mesh
-      n_nodes = mesh$n # Number of vertices (nodes) in the mesh
-    )
+    scenarios[[scenario_name]] <- list(N_sp = N_sp,
+                                       sp_points = sp_points,
+                                       mesh = mesh,
+                                       n_triangles = nrow(mesh$graph$tv),
+                                       n_nodes = mesh$n)
     
-    # Print the number of vertices for this scenario for a quick check
-    cat(paste("Scenario", i, "created with", mesh$n, "vertices.\n"))
-  }
+    cat(paste("Scenario", i, "created with", mesh$n, "vertices.\n"))}
   return(scenarios)}
 
 
@@ -216,12 +193,36 @@ scenarios$scenario3$mesh$n
 scenarios$scenario4$mesh$n
 
 
-obj1_tps <- run_tmb(N_sp = scenarios$scenario1$N_sp, dim_grid = 30, sp_points = scenarios$scenario1$sp_points, mesh = scenarios$scenario1$mesh)
-obj2_tps <- run_tmb(N_sp = scenarios$scenario2$N_sp, dim_grid = 30, sp_points = scenarios$scenario2$sp_points, mesh = scenarios$scenario2$mesh)
-obj3_tps <- run_tmb(N_sp = scenarios$scenario3$N_sp, dim_grid = 30, sp_points = scenarios$scenario3$sp_points, mesh = scenarios$scenario3$mesh)
-obj4_tps <- run_tmb(N_sp = scenarios$scenario4$N_sp, dim_grid = 30, sp_points = scenarios$scenario4$sp_points, mesh = scenarios$scenario4$mesh)
+obj1_tps <- run_tmb_tps(N_sp = scenarios$scenario1$N_sp, dim_grid = 30, sp_points = scenarios$scenario1$sp_points, mesh = scenarios$scenario1$mesh)
+obj2_tps <- run_tmb_tps(N_sp = scenarios$scenario2$N_sp, dim_grid = 30, sp_points = scenarios$scenario2$sp_points, mesh = scenarios$scenario2$mesh)
+obj3_tps <- run_tmb_tps(N_sp = scenarios$scenario3$N_sp, dim_grid = 30, sp_points = scenarios$scenario3$sp_points, mesh = scenarios$scenario3$mesh)
+obj4_tps <- run_tmb_tps(N_sp = scenarios$scenario4$N_sp, dim_grid = 30, sp_points = scenarios$scenario4$sp_points, mesh = scenarios$scenario4$mesh)
 
-obj1[[6]]
+fits_TMB_tps <- list(obj1_tps, obj2_tps, obj3_tps, obj4_tps)
+
+saveRDS(fits_TMB_tps, file='outputs/fits_TMB_tps.RDS')
+
+
+obj_tps <- obj1_tps[[1]]
+rep_tps <- obj1_tps[[3]]
+# 
+# Z_est <- as.vector(rep_tps$par.random[names(rep_tps$par.random) == "Z"])
+# tps_field_grid <- as.vector(obj_tps$report()$field_grid)
+
+tau_est <- exp(rep_spde$par.fixed["logtau"])
+kappa_est <- exp(rep_spde$par.fixed["logkappa"])
+sigma_est <- exp(rep_spde$par.fixed["logsigma"])
+
+# SPDE
+tps_field_grid <- obj1_tps[[1]]$report()$field_grid
+class(tps_field_grid)
+
+true_field_grid <- as.numeric(obj1_tps[[8]])
+
+rmse_tps <- sqrt(mean((tps_field_grid - true_field_grid)^2))
+r2_tps   <- cor(tps_field_grid, true_field_grid)^2
+mae_tps  <- mean(abs(tps_field_grid - true_field_grid))
+
 
 
 M = list()
@@ -300,10 +301,10 @@ message(paste("Estimated alpha:", round(alpha_est, 3)))
 
 
 
-mcmc_tps1 <- readRDS('stan_tps_1.RDS')
-mcmc_tps2 <- readRDS('stan_tps_2.RDS')
-mcmc_tps3 <- readRDS('stan_tps_3.RDS')
-mcmc_tps4 <- readRDS('stan_tps_4.RDS')
+mcmc_tps1 <- readRDS('outputs/stan_tps_1.RDS')
+mcmc_tps2 <- readRDS('outputs/stan_tps_2.RDS')
+mcmc_tps3 <- readRDS('outputs/stan_tps_3.RDS')
+mcmc_tps4 <- readRDS('outputs/stan_tps_4.RDS')
 
 
 tps_post_grid1 <- extract(mcmc_tps1)$Z  # Posterior samples of KL coefficients
@@ -330,7 +331,7 @@ tps_field_grid4 <- as.vector(obj4_tps[[4]]$Phi_kle_grid %*% tps_mean_grid4)
 par(mfrow = c(4, 3))
 image(matrix(obj1_tps[[8]], 30, 30), main = "True GRF 1",
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(spde_field_grid1, 30, 30), main = paste0("Estimated GRF (spde=", obj1_spde[[6]]$n, ")"),
+image(matrix(obj1_spde[[8]], 30, 30), main = paste0("Estimated GRF (spde=", obj1_spde[[6]]$n, ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
 image(matrix(tps_field_grid1, 30, 30), main = paste0("Estimated GRF (M_KLE=", obj1_tps[[6]], ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
@@ -338,26 +339,25 @@ image(matrix(tps_field_grid1, 30, 30), main = paste0("Estimated GRF (M_KLE=", ob
 
 image(matrix(obj2_tps[[8]], 30, 30), main = "True GRF 2",
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(spde_field_grid1, 30, 30), main = paste0("Estimated GRF (spde=", obj2_spde[[6]]$n, ")"),
+image(matrix(obj2_spde[[8]], 30, 30), main = paste0("Estimated GRF (spde=", obj2_spde[[6]]$n, ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(tps_field_grid2, 30, 30), main = paste0("Estimated GRF (M_KLE=", obj2_tps[[6]], ")"),
+image(matrix(obj2_tps[[8]], 30, 30), main = paste0("Estimated GRF (M_KLE=", obj1_tps[[6]], ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
 
 
 image(matrix(obj3_tps[[8]], 30, 30), main = "True GRF 3",
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(spde_field_grid3, 30, 30), main = paste0("Estimated GRF (spde=", obj3_spde[[6]]$n, ")"),
+image(matrix(obj3_spde[[8]], 30, 30), main = paste0("Estimated GRF (spde=", obj3_spde[[6]]$n, ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(tps_field_grid3, 30, 30), main = paste0("Estimated GRF (M_KLE=", obj3_tps[[6]], ")"),
+image(matrix(obj3_tps[[8]], 30, 30), main = paste0("Estimated GRF (M_KLE=", obj3_tps[[6]], ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
-
 
 
 image(matrix(obj4_tps[[8]], 30, 30), main = "True GRF 4",
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(spde_field_grid4, 30, 30), main = paste0("Estimated GRF (spde=", obj4_spde[[6]]$n, ")"),
+image(matrix(obj4_spde[[8]], 30, 30), main = paste0("Estimated GRF (spde=", obj4_spde[[6]]$n, ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(tps_field_grid4, 30, 30), main = paste0("Estimated GRF (M_KLE=", obj4_tps[[6]], ")"),
+image(matrix(obj4_tps[[8]], 30, 30), main = paste0("Estimated GRF (M_KLE=", obj4_tps[[6]], ")"),
       col = hcl.colors(100, "viridis"), asp = 1)
 
 

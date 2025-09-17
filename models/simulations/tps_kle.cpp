@@ -15,7 +15,7 @@ template<class Type>
 Type objective_function<Type>::operator() ()
 {
   // DATA
-  DATA_VECTOR(y);
+  DATA_VECTOR(y_obs);
   DATA_MATRIX(Phi_kle_sp); // The pre-computed KLE basis at observation points
   DATA_MATRIX(Phi_kle_grid); // The pre-computed KLE basis at grid points
   DATA_VECTOR(S_diag_truncated); // Eigenvalues of S (truncated)
@@ -35,12 +35,12 @@ Type objective_function<Type>::operator() ()
   //==================================================
   Type nlp = Type(0.0);                                 // negative log prior  (priors)
   
-  nlp -= dcauchy(sigma,   Type(0.0),   Type(1.0));
-  nlp += logsigma; // Jacobian
+  nlp -= dnorm(logsigma,   Type(0.0),   Type(1.0), true);
+  //nlp += logsigma; // Jacobian
   
   // Prior on alpha 
-  nlp -= dcauchy(alpha, Type(0.0), Type(1.0), true);
-  nlp += logalpha; // Jacobian
+  nlp -= dnorm(logalpha, Type(0.0), Type(1.0), true);
+  //nlp += logalpha; // Jacobian
   
   // Prior for Z_k: Z_k ~ N(0, lambda_k)
   // lambda_k = 1 / (1 + alpha * S_diag(k))
@@ -53,7 +53,7 @@ Type objective_function<Type>::operator() ()
   Type prior_sd;
   for(int k=M_P_null_space; k < S_diag_truncated.size(); ++k){
     Type S_diag_k = S_diag_truncated(k);
-    prior_sd = sqrt(Type(1.0) / (Type(1.0) + alpha * S_diag_k));
+    prior_sd = sqrt(Type(1.0) / (Type(1.0) + alpha * S_diag_k + 1e-12));
     nlp -= dnorm(Z(k), Type(0.0), prior_sd, true);
   }
 
@@ -65,10 +65,10 @@ Type objective_function<Type>::operator() ()
   
   //====================================================
   // Likelihood
-  vector<Type> log_lik(y.size());
+  vector<Type> log_lik(y_obs.size());
   
-  for( int i = 0; i<y.size(); i++){
-    log_lik(i) = dnorm(y(i), field_sp(i), sigma, true);
+  for( int i = 0; i<y_obs.size(); i++){
+    log_lik(i) = dnorm(y_obs(i), field_sp(i), sigma, true);
   }
   // Here in nll the likelihood is stored
   Type nll = -log_lik.sum(); // total NLL
@@ -78,19 +78,22 @@ Type objective_function<Type>::operator() ()
   
   
   // Simule data from the mu 
-  vector<Type> y_sim(y.size());
-  for( int i=0; i<y.size(); i++){
+  vector<Type> y_sim(y_obs.size());
+  for( int i=0; i<y_obs.size(); i++){
     SIMULATE {
       y_sim(i) = rnorm(field_sp(i), sigma);
-      REPORT(y_sim);
     }
+    REPORT(y_sim);
   }
-  // RECONSTRUCTION
 
-  // REPORTING
+  //===========================
+  // REPORT
+  //===========================
+  REPORT(field_sp);
   REPORT(field_grid);
   REPORT(sigma);
   REPORT(alpha);
   REPORT(prior_sd);
+  REPORT(Z);
   return jnll;
 }
