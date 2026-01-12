@@ -1,99 +1,141 @@
+// include libraries
 #include <TMB.hpp>
+#include <Eigen/Sparse>
+#include <vector>
+#include <string>
+using namespace density;
+using Eigen::SparseMatrix;
 
-// dcauchy for hyperparameters
 template<class Type>
-Type dcauchy(Type x, Type mean, Type shape, int give_log=0){
-  Type logres = 0.0;
-  logres-= log(M_PI);
-  logres-= log(shape);
-  // Note, this is unstable and should switch to log1p formulation
-  logres-= log(1 + pow( (x-mean)/shape ,2));
+Type log1p_custom(Type x) {
+  if (CppAD::abs(x) < 1e-8) {
+    return x - x*x/2;
+  } else {
+    return log(Type(1.0) + x);
+  }
+} 
+
+template<class Type>
+Type dcauchy_stable(Type x, Type mean, Type scale, int give_log=0){
+  Type z = (x - mean) / scale;
+  Type logres = -log(M_PI) - log(scale) - log1p_custom(z * z);
   if(give_log) return logres; else return exp(logres);
 }
 
 template<class Type>
+Type dlognorm(Type x, Type meanlog, Type sdlog, int give_log=0){
+  Type logres = Type(0.0);
+  logres -= log(x);
+  logres -= log(sdlog);
+  logres -= Type(0.5) * log(2.0 * M_PI);
+  logres -= Type(0.5) * pow((log(x) - meanlog) / sdlog, 2);
+  if(give_log) return logres; else return exp(logres);
+} 
+
+template<class Type>
 Type objective_function<Type>::operator() ()
 {
+  
+  //====================================================
   // DATA
+  //====================================================
   DATA_VECTOR(y_obs);
-  DATA_MATRIX(Phi_kle_sp); // The pre-computed KLE basis at observation points
-  DATA_MATRIX(Phi_kle_grid); // The pre-computed KLE basis at grid points
-  DATA_VECTOR(S_diag_truncated); // Eigenvalues of S (truncated)
-  DATA_INTEGER(M_P_null_space); // Number of polynomial modes
- 
+  DATA_MATRIX(Phi_kle_sp);
+  DATA_MATRIX(Phi_kle_grid);
+  DATA_VECTOR(S_diag_truncated);
+  DATA_INTEGER(M_P_null_space);
+  DATA_SCALAR(lambda_sigma);
+  
+  //====================================================
   // PARAMETERS
-  PARAMETER_VECTOR(Z); // KLE coefficients (length M_truncation)
-  PARAMETER(logsigma); // Log of observation noise SD
-  PARAMETER(logalpha); // Log of regularization parameter
-
-  // MODEL SETUP
+  //====================================================
+  PARAMETER_VECTOR(z_tilde);
+  PARAMETER(logsigma);
+  PARAMETER(logalpha);
+  
+  //====================================================
+  // TRANSFORMED PARAMETERS
+  //====================================================
   Type sigma = exp(logsigma);
   Type alpha = exp(logalpha);
   
-  //==================================================
+  //====================================================
   // PRIORS
-  //==================================================
-  Type nlp = Type(0.0);                                 // negative log prior  (priors)
+  //====================================================
+  Type nlp = Type(0.0);
   
-  nlp -= dnorm(logsigma,   Type(0.0),   Type(1.0), true);
-  //nlp += logsigma; // Jacobian
+  // Prior for sigma: PC prior (exponential)
+  nlp -= dexp(sigma, lambda_sigma, true);
+  nlp -= logsigma;
   
-  // Prior on alpha 
-  nlp -= dnorm(logalpha, Type(0.0), Type(1.0), true);
-  //nlp += logalpha; // Jacobian
-  
-  // Prior for Z_k: Z_k ~ N(0, lambda_k)
-  // lambda_k = 1 / (1 + alpha * S_diag(k))
-  // For the unpenalized modes (polynomial), S_diag(k) = 0, so lambda_k = 1
-  for(int k=0; k < M_P_null_space; ++k){
-    nlp -= dnorm(Z(k), Type(0.0), Type(1.0), true);
-  }
-  
-  // Prior for penalized modes
-  Type prior_sd;
-  for(int k=M_P_null_space; k < S_diag_truncated.size(); ++k){
-    Type S_diag_k = S_diag_truncated(k);
-    prior_sd = sqrt(Type(1.0) / (Type(1.0) + alpha * S_diag_k + 1e-12));
-    nlp -= dnorm(Z(k), Type(0.0), prior_sd, true);
-  }
+  // Prior for alpha: Log-normal
+  nlp -= dnorm(logalpha, Type(0.0), Type(3.0), true);
 
-  
-  // Z has M_truncation elements
-  vector<Type> field_sp = Phi_kle_sp * Z;
-  vector<Type> field_grid = Phi_kle_grid * Z; // For reporting
-  
+  // Standard normal prior on whitened coefficients
+  int M = z_tilde.size();
+  for(int k = 0; k < M; k++){
+    nlp -= dnorm(z_tilde(k), Type(0.0), Type(1.0), true);
+  }
   
   //====================================================
-  // Likelihood
-  vector<Type> log_lik(y_obs.size());
+  // KLE SCALING (non-centered parameterization)
+  //====================================================
+  vector<Type> scale(M);
   
-  for( int i = 0; i<y_obs.size(); i++){
-    log_lik(i) = dnorm(y_obs(i), field_sp(i), sigma, true);
+  for(int k = 0; k < M; k++){
+    if(k < M_P_null_space){
+      // CRITICAL FIX: Null space should be UNPENALIZED
+      scale(k) = Type(1.0);  // No smoothing for polynomial trend
+    } else {
+      // Penalized components: λ_k = 1/(1 + α v_k)
+      scale(k) = Type(1.0) / sqrt(Type(1.0) + alpha * S_diag_truncated(k) + Type(1e-10));
+    }
   }
-  // Here in nll the likelihood is stored
-  Type nll = -log_lik.sum(); // total NLL
   
-  // Total negative log-like
-  Type jnll = nll + nlp;
+  vector<Type> z = scale * z_tilde;
+  
+  //====================================================
+  // FIELD CONSTRUCTION
+  //====================================================
+  vector<Type> field_sp = Phi_kle_sp * z;
+  vector<Type> field_grid = Phi_kle_grid * z;
+  
+  //====================================================
+  // LIKELIHOOD
+  //====================================================
+  int n_obs = y_obs.size();
+  Type nll = Type(0.0);
+  
+  for(int i = 0; i < n_obs; i++){
+    nll -= dnorm(y_obs(i), field_sp(i), sigma, true);
+  }
   
   
-  // Simule data from the mu 
+  //=========================
+  // SIMULATION
+  //=========================
   vector<Type> y_sim(y_obs.size());
   for( int i=0; i<y_obs.size(); i++){
     SIMULATE {
       y_sim(i) = rnorm(field_sp(i), sigma);
     }
     REPORT(y_sim);
-  }
-
-  //===========================
+  } 
+  
+  //====================================================
   // REPORT
-  //===========================
+  //====================================================
   REPORT(field_sp);
   REPORT(field_grid);
-  REPORT(sigma);
+  REPORT(z);
+  REPORT(z_tilde);
+  REPORT(scale);
   REPORT(alpha);
-  REPORT(prior_sd);
-  REPORT(Z);
-  return jnll;
-}
+  REPORT(sigma);
+  
+  ADREPORT(z);
+  ADREPORT(alpha);
+  ADREPORT(sigma);
+  
+  return nll + nlp;
+} 

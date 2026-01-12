@@ -1,5 +1,5 @@
 rm(list = ls())
-setwd("C:/Users/Usuario/Desktop/KLE/real_application")
+setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application")
 
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
@@ -28,7 +28,7 @@ set.seed(1234)
   # Convert sp_points to matrix
   sp_matrix <- as.matrix(sp_data[, c(1:2)])
   mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.286, max.edge = c(1, 1.5)) 
-  #mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.31, max.edge = c(1, 1.5))
+
   
   #====================================================
   # Grid points
@@ -63,8 +63,7 @@ set.seed(1234)
                    s0_u      = 1.0,   # e.g. 5% chance that sigma_u > 1
                    alpha_s_u = 0.05,
                    cauchy_scale_e = 5.0)
-                   # lambda_rho = -log(0.05)*0.05,
-                   # lambda_sigma_u = -log(0.05)/5)
+
   
   #========================================
   #                TMB par
@@ -72,12 +71,9 @@ set.seed(1234)
   tmb_par <- list(logsigma_e = log(0.5),
                   logrho   = log(50),   # initial rho ~ 50km (adjust to your domain scale),
                   logsigma_u = log(0.5),
-                  u_raw = rep(0, mesh$n))
+                  u_tilde = rep(0, mesh$n))
   
-  obj_spde <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "spde", random = "u_raw")
-  # lwr <- c(0, 0, 0)
-  # upr <- c(Inf, Inf, Inf)
-  # opt_spde = nlminb(obj_spde$par, obj_spde$fn, obj_spde$gr, lower = lwr, upper = upr)
+  obj_spde <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "spde", random = "u_tilde")
   opt_spde = nlminb(obj_spde$par, obj_spde$fn, obj_spde$gr)
   rep_spde <- sdreport(obj_spde)
   
@@ -188,7 +184,6 @@ plot(sp_points_germany, add = TRUE, col = "red", pch = 20)
 
 
 mesh = inla.mesh.2d(loc = sp_data[, c(1:2)], cutoff = 0.286, max.edge = c(1, 1.5))
-#mesh = inla.mesh.2d(loc = sp_data[, c(1:2)], cutoff = 0.31, max.edge = c(1, 1.5))
 plot(mesh); points(sp_data[, c(1:2)], col = "red")
 mesh$n
 
@@ -200,28 +195,24 @@ mesh$n
 spde_tmb <- run_tmb_spde(sp_data, dim_grid = 100)
 spde_tmb$mesh$n
 
-saveRDS(spde_tmb, file='spde_tmb.RDS')
+saveRDS(spde_tmb, file='outputs/spde_tmb.RDS')
 
 
 #======================================================
 #               Run the MCMC sampling
 #======================================================
 
-# lwr <- c(0, 0, 0)
-# upr <- c(Inf, Inf, Inf)
-
 startTime <- Sys.time()
 spde_mcmc <- tmbstan(spde_tmb[[1]],
                            chains= 3, open_progress = FALSE,
                            control = list(max_treedepth= 12,  adapt_delta = 0.9),
                            iter = 3000, warmup= 700, cores=no_cores,
-                           # lower = lwr, upper = upr, seed = 12345,
                            init = 'last.par.best', seed = 12345)
 endTime <- Sys.time()
 timeUsed = difftime(endTime, startTime, units='mins')
 print(timeUsed)
 
 
-saveRDS(spde_mcmc, file='spde_mcmc.RDS')
+saveRDS(spde_mcmc, file='outputs/spde_mcmc.RDS')
 
 

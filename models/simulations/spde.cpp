@@ -45,98 +45,111 @@ Type ldhalfnorm(Type x, Type var){
 template<class Type>
 Type objective_function<Type>::operator() ()
 {
-  
-  
   //=========================
-  //      DATA SECTION
+  // DATA
   //=========================
-  DATA_VECTOR(y);                       // Observed data
-  DATA_SPARSE_MATRIX(A_obs);            // Projection matrix for observations
-  DATA_SPARSE_MATRIX(A_grid);           // Projection matrix for grid prediction
-  DATA_STRUCT(spde_mat, spde_t);        // Three matrices needed for representing the GMRF, see p. 8 in Lindgren et al. (2011)
-  
+  DATA_VECTOR(y);
+  DATA_SPARSE_MATRIX(A_obs);
+  DATA_SPARSE_MATRIX(A_grid);
+  DATA_STRUCT(spde_mat, spde_t);
+   
   DATA_SCALAR(lambda_rho);
   DATA_SCALAR(lambda_sigma_u);
-  
+   
   //=========================
-  //   PARAMETER SECTION
+  // PARAMETERS
   //=========================
   PARAMETER(sigma);
   PARAMETER(rho);
   PARAMETER(sigma_u);
-  
-  PARAMETER_VECTOR(u);	          // spatial effects
-
-// Transformed parameters
+   
+  // Non-centered latent field
+  PARAMETER_VECTOR(u_tilde);   // u_tilde ~ N(0, Q^{-1})
+   
+  //=========================
+  // TRANSFORMS
+  //=========================
+  Type kappa = sqrt(Type(8.0)) / rho;
+  Type tau   = Type(1.0) / (kappa * sigma_u);
+   
+  SparseMatrix<Type> Q = Q_spde(spde_mat, kappa);
+   
+  // Transform to centered field
+  vector<Type> u = u_tilde / tau;
+   
+  //=========================
+  // PRIORS
+  //=========================
+  Type nlp = 0.0;
+   
+  // Prior on observation SD
+  nlp -= dcauchy(sigma, Type(0.0), Type(5.0), true);
+   
+  // Prior on range (via inverse rho)
   Type rho_inv = pow(rho, -1);
   Type lambda_rho_inv = pow(lambda_rho, -1);
-
-  // ===================================
-  //               Priors
-  // ===================================
-  Type nlp = 0.0;
-  
-  // Prior on sigma
-  nlp -= dcauchy(sigma,   Type(0.0), Type(5.0), true);
-
-  nlp -= dweibull(rho_inv,  lambda_rho_inv, Type(1.0), true);   //
-  //nlp -= 2.0 * log(rho); // Jacobian correction
-
-  //nlp -= dexp(rho,          lambda_rho,            true);
-  nlp -= dexp(sigma_u,      lambda_sigma_u,        true);
-  
-  Type kappa = sqrt(8)/rho;
-  Type tau   = 1/(kappa*sigma_u);
-  SparseMatrix<Type> Q = Q_spde(spde_mat, kappa);
-  
-  
-
-  // Negative log-likelihood
+  nlp -= dweibull(rho_inv, lambda_rho_inv, Type(1.0), true);
+  // Jacobian already implicit in transformation
+   
+  // Prior on marginal SD
+  nlp -= dexp(sigma_u, lambda_sigma_u, true);
+   
+  //=========================
+  // LATENT FIELD PRIOR
+  //=========================
   Type nll = 0.0;
-  // Prior on spatial field (GMRF)
-  // scaled precision: Q * tau^2
-  nll += SCALE(GMRF(Q), 1/ tau)(u); // returns negative already
-  
-  // Likelihood
-  int n = y.size();	                 // number of observations 
+   
+  // u_tilde ~ N(0, Q^{-1})
+  nll += GMRF(Q)(u_tilde);
+   
+  //=========================
+  // LIKELIHOOD
+  //=========================
   vector<Type> field_sp = A_obs * u;
-  for(int i = 0; i < n; i++){
+   
+  for(int i = 0; i < y.size(); i++){
     nll -= dnorm(y(i), field_sp(i), sigma, true);
   }
-
-  // Project to prediction grid
+   
   vector<Type> field_grid = A_grid * u;
-  
-  // Calculate joint negative log likelihood
+   
+  //=========================
+  // JOINT NLL
+  //=========================
   Type jnll = nll + nlp;
-  
-  
-  // Simulate data from field_sp
-  vector<Type> y_sim(n);
-  for( int i=0; i<n; i++){
-    SIMULATE {
+   
+  //=========================
+  // SIMULATION
+  //=========================
+  vector<Type> y_sim(y.size());
+  SIMULATE {
+    for(int i = 0; i < y.size(); i++){
       y_sim(i) = rnorm(field_sp(i), sigma);
-      };
+    } 
     REPORT(y_sim);
   }
-  
-
-  // REPORT 
+   
+  //=========================
+  // REPORT
+  //=========================
   REPORT(sigma);
-  REPORT(tau);
-  REPORT(kappa);
-  REPORT(sigma_u);
   REPORT(rho);
+  REPORT(sigma_u);
+  REPORT(kappa);
+  REPORT(tau);
+  REPORT(u);
+  REPORT(u_tilde);
   REPORT(field_sp);
   REPORT(field_grid);
-  REPORT(Q);
-  
-  // ADREPORT
-  ADREPORT(field_sp);
-  ADREPORT(field_grid);  // Enable posterior SD for uncertainty
+   
   ADREPORT(sigma);
-  ADREPORT(tau);
+  ADREPORT(rho);
+  ADREPORT(sigma_u);
   ADREPORT(kappa);
-
+  ADREPORT(tau);
+  ADREPORT(field_grid);
+  ADREPORT(u);
+  ADREPORT(u_tilde);
+   
   return jnll;
 }

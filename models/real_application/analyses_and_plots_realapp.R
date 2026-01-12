@@ -1,4 +1,4 @@
-setwd("C:/Users/Usuario/Desktop/KLE/real_application")
+setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs")
 rm(list = ls())
 
 options(scipen = 999)
@@ -17,52 +17,383 @@ no_cores <- parallelly::availableCores() - 1
 spde_tmb <- readRDS('spde_tmb.RDS')
 spde_mcmc <- readRDS('spde_mcmc.RDS')
 
-regTPS_KLE_tmb <- readRDS('new/regTPS_KLE_tmb.RDS')
-regTPS_KLE_mcmc <- readRDS('new/regTPS_KLE_mcmc.RDS')
-
+regTPS_KLE_tmb <- readRDS('regTPS_KLE_tmb.RDS')
+regTPS_KLE_mcmc <- readRDS('regTPS_KLE_mcmc.RDS')
 
 
 #===================================================
-# Extracting the posteriors for the latent field
-# SPDE
+# Extract posterior for SPDE (NON-CENTERED)
 #===================================================
-spde_post_grid1 <- rstan::extract(spde_mcmc)$u  # Posterior samples of KL coefficients
-spde_mean_grid1 <- colMeans(spde_post_grid1)
-spde_field_grid1 <- as.vector(spde_tmb[[8]] %*% spde_mean_grid1)
+extract_spde_posterior <- function(mcmc_fit, A_grid) {
+  # Extract MCMC samples
+  post <- rstan::extract(mcmc_fit)
+  
+  u_tilde_draws <- post$u_tilde    # iter x n_mesh (whitened)
+  rho_draws     <- exp(post$logrho)
+  sigma_u_draws <- exp(post$logsigma_u)
+  
+  n_iter <- nrow(u_tilde_draws)
+  n_grid <- nrow(A_grid)
+  
+  # Storage
+  field_mean <- numeric(n_grid)
+  field_samples <- matrix(0, n_iter, n_grid)
+  
+  # Transform for each iteration
+  for (iter in 1:n_iter) {
+    # NON-CENTERED TRANSFORMATION: u = u_tilde / tau
+    kappa_iter <- sqrt(8) / rho_draws[iter]
+    tau_iter   <- 1.0 / (kappa_iter * sigma_u_draws[iter])
+    
+    # Transform to centered field
+    u_iter <- u_tilde_draws[iter, ] / tau_iter
+    
+    # Project to grid
+    field_iter <- as.vector(A_grid %*% u_iter)
+    
+    # Store
+    field_samples[iter, ] <- field_iter
+    field_mean <- field_mean + field_iter
+  }
+  
+  field_mean <- field_mean / n_iter
+  
+  # Compute quantiles for uncertainty
+  field_lower <- apply(field_samples, 2, quantile, probs = 0.025)
+  field_upper <- apply(field_samples, 2, quantile, probs = 0.975)
+  field_sd    <- apply(field_samples, 2, sd)
+  
+  return(list(
+    mean = field_mean,
+    samples = field_samples,
+    lower = field_lower,
+    upper = field_upper,
+    sd = field_sd
+  ))
+}
 
 #===================================================
-# Extracting the posteriors for the latent field
-# regTPS-KLE
+# Extract posterior for regTPS-KLE (NON-CENTERED)
 #===================================================
-tps_post_grid1 <- rstan::extract(regTPS_KLE_mcmc)$z  # Posterior samples of KL coefficients
-# tps_post_grid1 <- regTPS_KLE_tmb$rep_tmb$par.random  # Posterior samples of KL coefficients
-tps_mean_grid1 <- colMeans(tps_post_grid1)
-tps_field_grid1 <- as.vector(regTPS_KLE_tmb$Phi_kle_grid %*% tps_mean_grid1)
+extract_tps_posterior <- function(mcmc_fit, Phi_kle_grid, 
+                                  S_diag_truncated, M_P_null_space) {
+  # Extract MCMC samples
+  post <- rstan::extract(mcmc_fit)
+  
+  z_tilde_draws <- post$z_tilde      # iter x M (whitened)
+  alpha_draws   <- exp(post$logalpha)
+  
+  n_iter <- nrow(z_tilde_draws)
+  M      <- ncol(z_tilde_draws)
+  n_grid <- nrow(Phi_kle_grid)
+  
+  # Storage
+  field_mean <- numeric(n_grid)
+  field_samples <- matrix(0, n_iter, n_grid)
+  
+  # Transform for each iteration
+  for (iter in 1:n_iter) {
+    alpha_iter <- alpha_draws[iter]
+    
+    # NON-CENTERED TRANSFORMATION: Z = scale * z_tilde
+    z_iter <- numeric(M)
+    
+    # Null space (unpenalized)
+    if (M_P_null_space > 0) {
+      z_iter[1:M_P_null_space] <- z_tilde_draws[iter, 1:M_P_null_space]
+    }
+    
+    # Penalized components
+    if (M > M_P_null_space) {
+      idx_penalized <- (M_P_null_space + 1):M
+      S_k <- S_diag_truncated[idx_penalized]
+      
+      scale_factor <- 1.0 / sqrt(1.0 + alpha_iter * S_k + 1e-10)
+      z_iter[idx_penalized] <- z_tilde_draws[iter, idx_penalized] * scale_factor
+    }
+    
+    # Project to grid
+    field_iter <- as.vector(Phi_kle_grid %*% z_iter)
+    
+    # Store
+    field_samples[iter, ] <- field_iter
+    field_mean <- field_mean + field_iter
+  }
+  
+  field_mean <- field_mean / n_iter
+  
+  # Compute quantiles for uncertainty
+  field_lower <- apply(field_samples, 2, quantile, probs = 0.025)
+  field_upper <- apply(field_samples, 2, quantile, probs = 0.975)
+  field_sd    <- apply(field_samples, 2, sd)
+  
+  return(list(
+    mean = field_mean,
+    samples = field_samples,
+    lower = field_lower,
+    upper = field_upper,
+    sd = field_sd
+  ))
+}
+
+#===================================================
+# Apply extraction functions
+#===================================================
+spde_posterior <- extract_spde_posterior(
+  mcmc_fit = spde_mcmc,
+  A_grid   = spde_tmb$A_grid)
+
+tps_posterior <- extract_tps_posterior(
+  mcmc_fit         = regTPS_KLE_mcmc,
+  Phi_kle_grid     = regTPS_KLE_tmb$Phi_kle_grid,
+  S_diag_truncated = regTPS_KLE_tmb$S_diag_truncated,
+  M_P_null_space   = regTPS_KLE_tmb$M_P_null_space)
+
+#===================================================
+# Back-transform if sqrt was used
+#===================================================
+# If y_obs was sqrt-transformed, predictions are on sqrt scale
+# Back-transform to original scale:
+
+spde_field_original <- spde_posterior$mean^2
+tps_field_original  <- tps_posterior$mean^2
+
+# For uncertainty bounds on original scale (Delta method approximation):
+spde_lower_original <- spde_posterior$lower^2
+spde_upper_original <- spde_posterior$upper^2
+tps_lower_original  <- tps_posterior$lower^2
+tps_upper_original  <- tps_posterior$upper^2
+
+#===================================================
+# Visualization
+#===================================================
+
+# Get grid dimensions
+grid_total <- regTPS_KLE_tmb$grid_total
+dim_grid <- sqrt(nrow(grid_total))
+
+par(mfrow = c(2, 3), mar = c(2, 2, 3, 2))
+
+# SPDE predictions (original scale)
+image(matrix(spde_field_original, dim_grid, dim_grid), 
+      main = paste0("SPDE Mean (n_mesh=", spde_tmb$mesh$n, ")"),
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+# SPDE uncertainty
+image(matrix(spde_posterior$sd^2, dim_grid, dim_grid), 
+      main = "SPDE Posterior SD²",
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+# SPDE 95% CI width
+ci_width_spde <- spde_upper_original - spde_lower_original
+image(matrix(ci_width_spde, dim_grid, dim_grid), 
+      main = "SPDE 95% CI Width",
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+# regTPS-KLE predictions (original scale)
+image(matrix(tps_field_original, dim_grid, dim_grid), 
+      main = paste0("regTPS-KLE Mean (M=", regTPS_KLE_tmb$M_truncation, ")"),
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+# regTPS-KLE uncertainty
+image(matrix(tps_posterior$sd^2, dim_grid, dim_grid), 
+      main = "regTPS-KLE Posterior SD²",
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+# regTPS-KLE 95% CI width
+ci_width_tps <- tps_upper_original - tps_lower_original
+image(matrix(ci_width_tps, dim_grid, dim_grid), 
+      main = "regTPS-KLE 95% CI Width",
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+#===================================================
+# Comparison plot: sqrt scale (for consistency check)
+#===================================================
+par(mfrow = c(1, 2), mar = c(3, 3, 3, 2))
+
+image(matrix(spde_posterior$mean, dim_grid, dim_grid), 
+      main = "SPDE (sqrt scale)",
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+image(matrix(tps_posterior$mean, dim_grid, dim_grid), 
+      main = "regTPS-KLE (sqrt scale)",
+      col = hcl.colors(100, "viridis"), asp = 1)
+
+#===================================================
+# Summary statistics
+#===================================================
+cat("\n=== SUMMARY STATISTICS ===\n\n")
+
+cat("SPDE (original scale):\n")
+cat("  Mean field: ", round(mean(spde_field_original), 3), "\n")
+cat("  SD field:   ", round(sd(spde_field_original), 3), "\n")
+cat("  Range:      [", round(min(spde_field_original), 3), ", ", 
+    round(max(spde_field_original), 3), "]\n")
+cat("  Mean uncertainty (SD): ", round(mean(spde_posterior$sd^2), 3), "\n\n")
+
+cat("regTPS-KLE (original scale):\n")
+cat("  Mean field: ", round(mean(tps_field_original), 3), "\n")
+cat("  SD field:   ", round(sd(tps_field_original), 3), "\n")
+cat("  Range:      [", round(min(tps_field_original), 3), ", ", 
+    round(max(tps_field_original), 3), "]\n")
+cat("  Mean uncertainty (SD): ", round(mean(tps_posterior$sd^2), 3), "\n\n")
+
+# Correlation between methods
+cor_sqrt <- cor(spde_posterior$mean, tps_posterior$mean)
+cor_original <- cor(spde_field_original, tps_field_original)
+
+cat("Correlation between methods:\n")
+cat("  Sqrt scale:     ", round(cor_sqrt, 4), "\n")
+cat("  Original scale: ", round(cor_original, 4), "\n")
+
+#===================================================
+# Save results
+#===================================================
+results <- list(
+  spde = list(
+    mean_sqrt = spde_posterior$mean,
+    mean_original = spde_field_original,
+    sd = spde_posterior$sd,
+    lower_original = spde_lower_original,
+    upper_original = spde_upper_original,
+    samples = spde_posterior$samples
+  ),
+  tps = list(
+    mean_sqrt = tps_posterior$mean,
+    mean_original = tps_field_original,
+    sd = tps_posterior$sd,
+    lower_original = tps_lower_original,
+    upper_original = tps_upper_original,
+    samples = tps_posterior$samples
+  ),
+  grid = grid_total
+)
+
+
+
+
+
+
+
+
+
+
 
 #====================================================================================
 # Plotting (assuming grid_total coordinates are still dim_grid x dim_grid)
 par(mfrow = c(2, 1))
 
-# z_scaled <- as.vector(regTPS_KLE_tmb$obj$report()$z_scaled %*% regTPS_KLE_tmb$Phi_kle_grid)
 
-image(matrix(spde_field_grid1 , 100, 100), main = paste0("Estimated GRF (spde=", spde_tmb[[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(tps_field_grid1, 100, 100), main = paste0("Estimated GRF (M_KLE=", regTPS_KLE_tmb[[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
+#=================================================
+#            Loading the data
+#=================================================
+remove_stations = T # if true, remove stations with more than 25% of missing values according to hourly data.
+
+covnames = c("b0", "nightlight_450", "population_1000", "population_3000",
+             "road_class_1_5000", "road_class_2_100", "road_class_3_300",  
+             "trop_mean_filt", "road_class_1_100")
+
+mergedall = read.csv("https://raw.githubusercontent.com/mengluchu/uncertainty/master/data_vis_exp/DENL17_uc.csv")
+if (remove_stations == T)
+{
+  file_url <- "https://raw.githubusercontent.com/mengluchu/uncertainty/master/data_vis_exp/missingstation.rda?raw=true"
+  load(url(file_url)) # remove stations contain more less than 25% of data
+  
+  mergedall =mergedall%>%filter(!(AirQualityStation %in% msname)) #474
+}
+
+resolution <- 100   # resolution of grid
+y_var = "mean_value"
+prestring =  "road|nightlight|population|temp|wind|trop|indu|elev|radi"
+varstring = paste(prestring,y_var,sep="|")
+
+mergedall$b0 =1
 
 
 
-# Germany border
+
+#======================================
+#        Data for modeling
+#======================================
+d2 <- mergedall%>%dplyr::select(covnames) %>% data.frame
+d2$y <- mergedall$mean_value #    
+d2$coox <- mergedall$Longitude
+d2$cooy <- mergedall$Latitude
+
+head(mergedall)
+head(d2)
+
+plot(d2$coox, d2$cooy) # spatial locations in Netherlands and Germany
+
+
+
+
+#========================================================
+#      Taking a sample of the full data
+#========================================================
+set.seed(1234)
+data_to_fit <- d2 %>% sample_frac(1.0)
+dim(data_to_fit)
+
+hist(sqrt(data_to_fit$y))
+#======================================================
+#               Run the function
+#======================================================
+# Spatial locations
+sp_points <- data.frame(data_to_fit$coox, data_to_fit$cooy, data_to_fit$y)
+colnames(sp_points) <- c("s1", "s2", "y_obs")
+sp_data <- sp_points[!duplicated(sp_points[, c("s1", "s2")]),]
+
+hist(sp_data$y_obs)
+summary(sp_data$y_obs)
+
+#===================================
+# Get Germany border (WGS84)
+#-----------------------------------
+library(sf)
+library(rnaturalearth)
+
 germany_border <- ne_countries(country = "Germany", returnclass = "sf")
+
+#==================================================
+# Convert the points to sf (WGS84 = EPSG:4326)
+#--------------------------------------------------
+sp_points_sf <- st_as_sf(sp_data, coords = c("s1", "s2"), crs = 4326)
+
+#==================================================
+# Spatial filter (keep only points inside Germany)
+#--------------------------------------------------
+sp_points_germany <- sp_points_sf[germany_border, ]
+
+#==================================================
+# Extract lon/lat and add back to data frame
+#--------------------------------------------------
+coords_ll <- st_coordinates(sp_points_germany)
+sp_points_germany_df <- as.data.frame(sp_points_germany)
+sp_points_germany_df$lon <- coords_ll[,1]
+sp_points_germany_df$lat <- coords_ll[,2]
+
+# Final result
+head(sp_points_germany_df)
+
+
+sp_data <- data.frame("s1"= sp_points_germany_df$lon, 
+                      "s2"= sp_points_germany_df$lat,
+                      "y_obs" = sp_points_germany_df$y_obs)
+
+# Check
+plot(germany_border$geometry)
+plot(sp_points_germany, add = TRUE, col = "red", pch = 20)
+
 
 grid_total <- regTPS_KLE_tmb$grid_total
 
 # Convert your grids + fields into data frames
 df_spde <- grid_total  %>%
-  mutate(value = as.vector(spde_field_grid1))
+  mutate(value = as.vector(spde_posterior$mean))
 
 df_tps <- grid_total %>%
-  mutate(value = as.vector(tps_field_grid1))
+  mutate(value = as.vector(tps_posterior$mean))
 
 # Plot 1: SPDE field
 
@@ -102,12 +433,8 @@ grid.arrange(p1, p2, ncol = 1)
 #===================================================
 grid_total <- regTPS_KLE_tmb$grid_total
 
-spde_post_field <- spde_post_grid1 %*% t(spde_tmb[[8]])  # samples × grid
-# careful: above might need transpose depending on A_grid dimensions
-# if dimensions mismatch, use: spde_field_samples <- (spde_tmb[[4]]$A_grid %*% t(spde_post_grid1))
-
 # Let's assume we now have: matrix (n_samples × n_gridpoints)
-spde_field_samples <- spde_post_field  
+spde_field_samples <- spde_posterior$samples  
 
 spde_summary <- apply(spde_field_samples, 2, quantile, probs = c(0.025, 0.5, 0.975))
 spde_summary <- t(spde_summary)
@@ -120,8 +447,7 @@ df_spde <- grid_total %>%
 #===================================================
 # Posterior summaries for TPS-KLE
 #===================================================
-tps_post_field <- tps_post_grid1 %*% t(regTPS_KLE_tmb$Phi_kle_grid)
-tps_field_samples <- tps_post_field
+tps_field_samples <- tps_posterior$samples
 
 tps_summary <- apply(tps_field_samples, 2, quantile, probs = c(0.025, 0.5, 0.975))
 tps_summary <- t(tps_summary)
@@ -129,7 +455,7 @@ colnames(tps_summary) <- c("q025", "median", "q975")
 
 df_tps <- grid_total %>%
   bind_cols(as.data.frame(tps_summary)) %>%
-  mutate(model = "TPS-KLE")
+  mutate(model = "regTPS-KLE")
 
 #===================================================
 # Combine
@@ -181,10 +507,10 @@ germany_border <- ne_countries(country = "Germany", returnclass = "sf")
 
 # Convert your grids + fields into data frames
 df_spde <- grid_total %>%
-  mutate(value = as.vector(spde_field_grid1))
+  mutate(value = as.vector(spde_posterior$mean))
 
 df_tps <- grid_total %>%
-  mutate(value = as.vector(tps_field_grid1))
+  mutate(value = as.vector(tps_posterior$mean))
 
 # Plot 1: SPDE field
 p1 <- ggplot() +
@@ -216,6 +542,14 @@ grid.arrange(p1, p2, ncol = 1)
 ## Posterior predictive check
 # Simulating from the SIMULATE function
 set.seed(1234)
+
+#==================================
+# Compile the model and load it
+dyn.load(dynlib("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/spde"))
+
+#==================================
+# Compile the model and load it
+dyn.load(dynlib("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/regTPS_KLE"))
 
 mat_sim = matrix(data=NA, nrow=length(spde_tmb[[1]]$simulate()$y_sim), ncol=100)
 mat_sim
@@ -386,15 +720,15 @@ dens_mean <- dens_df %>%
 
 
 
-
-# Save as high-quality PDF
-ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot7.pdf",
-       plot = p_all,        # Replace with your ggplot object name
-       device = cairo_pdf,    # Good for embedding text as text
-       width = 10,             # Width in inches
-       height = 6,            # Height in inches
-       dpi = 300              # Only affects raster elements, safe to keep high
-)
+# 
+# # Save as high-quality PDF
+# ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot10.pdf",
+#        plot = p_all,        # Replace with your ggplot object name
+#        device = cairo_pdf,    # Good for embedding text as text
+#        width = 10,             # Width in inches
+#        height = 6,            # Height in inches
+#        dpi = 300              # Only affects raster elements, safe to keep high
+# )
 
 
 
@@ -435,7 +769,7 @@ dens_mean <- dens_df %>%
   summarise(y = mean(y), .groups = "drop")
 
 # --- Plot ---
-p_all <- ggplot(df_all, aes(x = sim, group = rep)) +
+plot11 <- ggplot(df_all, aes(x = sim, group = rep)) +
   geom_histogram(
     data = data.frame(y_obs = y_obs),
     aes(x = y_obs, y = after_stat(density)),
@@ -448,16 +782,16 @@ p_all <- ggplot(df_all, aes(x = sim, group = rep)) +
   labs(title = "Simulated Values From The Posteriors",
        x = "Simulated Values", y = "Density") +
   theme_bw(base_size = 14) +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"), 
+  theme(plot.title = element_text(size = 16, hjust = 0.5, face = "bold"), 
         axis.title.x = element_text(size = 14),
         axis.title.y = element_text(size = 14),
-        strip.text = element_text(size = 16),
+        strip.text = element_text(size = 14),
         axis.text = element_text(size = 14))
-p_all
+plot11
 
-# Save as high-quality PDF
-ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot7.pdf",
-       plot = p_all,        # Replace with your ggplot object name
+# # Save as high-quality PDF
+ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot11.pdf",
+       plot = plot11,        # Replace with your ggplot object name
        device = cairo_pdf,    # Good for embedding text as text
        width = 10,             # Width in inches
        height = 6,            # Height in inches
@@ -468,7 +802,6 @@ ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot7.pdf",
 #===================================================
 #            LOO to compare the models
 #===================================================
-
 posterior_spde <- as.matrix(spde_mcmc)
 class(posterior_spde)
 

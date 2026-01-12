@@ -1,4 +1,4 @@
-setwd("C:/Users/Usuario/Desktop/KLE/real_application")
+setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs")
 rm(list = ls())
 
 options(scipen = 999)
@@ -98,7 +98,7 @@ plot_diagnostics(diag, sp_data)
 
 
 
-setwd("C:/Users/Usuario/Desktop/KLE/real_application")
+setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs")
 rm(list = ls())
 
 options(scipen = 999)
@@ -115,11 +115,11 @@ no_cores <- parallelly::availableCores() - 1
 # Reading the outputs
 # TMB models
 spde_tmb <- readRDS('spde_tmb.RDS')
-regTPS_KLE_tmb <- readRDS('new/regTPS_KLE_tmb.RDS')
+regTPS_KLE_tmb <- readRDS('regTPS_KLE_tmb.RDS')
 
 # MCMC models (Stan)
 spde_mcmc <- readRDS('spde_mcmc.RDS')
-regTPS_KLE_mcmc <- readRDS('new/regTPS_KLE_mcmc.RDS')
+regTPS_KLE_mcmc <- readRDS('regTPS_KLE_mcmc.RDS')
 
 
 #=================================================
@@ -220,38 +220,150 @@ sp_data <- data.frame("s1"= sp_points_germany_df$lon,
                       "y_obs" = sp_points_germany_df$y_obs)
 
 
-#========================================================
-# 1. Extract posterior samples of z (KLE coefficients)
-#========================================================
-u_post <- rstan::extract(spde_mcmc)$u   # matrix: iterations × M_truncation
 
-# Posterior mean for z
-u_mean <- colMeans(u_post)
+
+#===================================================
+# Extract posterior for SPDE (NON-CENTERED)
+#===================================================
+extract_spde_posterior <- function(mcmc_fit, A_grid) {
+  # Extract MCMC samples
+  post <- rstan::extract(mcmc_fit)
+  
+  u_tilde_draws <- post$u_tilde    # iter x n_mesh (whitened)
+  rho_draws     <- exp(post$logrho)
+  sigma_u_draws <- exp(post$logsigma_u)
+  
+  n_iter <- nrow(u_tilde_draws)
+  n_grid <- nrow(A_grid)
+  
+  # Storage
+  field_mean <- numeric(n_grid)
+  field_samples <- matrix(0, n_iter, n_grid)
+  
+  # Transform for each iteration
+  for (iter in 1:n_iter) {
+    # NON-CENTERED TRANSFORMATION: u = u_tilde / tau
+    kappa_iter <- sqrt(8) / rho_draws[iter]
+    tau_iter   <- 1.0 / (kappa_iter * sigma_u_draws[iter])
+    
+    # Transform to centered field
+    u_iter <- u_tilde_draws[iter, ] / tau_iter
+    
+    # Project to grid
+    field_iter <- as.vector(A_grid %*% u_iter)
+    
+    # Store
+    field_samples[iter, ] <- field_iter
+    field_mean <- field_mean + field_iter
+  }
+  
+  field_mean <- field_mean / n_iter
+  
+  # Compute quantiles for uncertainty
+  field_lower <- apply(field_samples, 2, quantile, probs = 0.025)
+  field_upper <- apply(field_samples, 2, quantile, probs = 0.975)
+  field_sd    <- apply(field_samples, 2, sd)
+  
+  return(list(
+    mean = field_mean,
+    samples = field_samples,
+    lower = field_lower,
+    upper = field_upper,
+    sd = field_sd
+  ))
+}
+
+#===================================================
+# Extract posterior for regTPS-KLE (NON-CENTERED)
+#===================================================
+extract_tps_posterior <- function(mcmc_fit, Phi_kle_grid, 
+                                  S_diag_truncated, M_P_null_space) {
+  # Extract MCMC samples
+  post <- rstan::extract(mcmc_fit)
+  
+  z_tilde_draws <- post$z_tilde      # iter x M (whitened)
+  alpha_draws   <- exp(post$logalpha)
+  
+  n_iter <- nrow(z_tilde_draws)
+  M      <- ncol(z_tilde_draws)
+  n_grid <- nrow(Phi_kle_grid)
+  
+  # Storage
+  field_mean <- numeric(n_grid)
+  field_samples <- matrix(0, n_iter, n_grid)
+  
+  # Transform for each iteration
+  for (iter in 1:n_iter) {
+    alpha_iter <- alpha_draws[iter]
+    
+    # NON-CENTERED TRANSFORMATION: Z = scale * z_tilde
+    z_iter <- numeric(M)
+    
+    # Null space (unpenalized)
+    if (M_P_null_space > 0) {
+      z_iter[1:M_P_null_space] <- z_tilde_draws[iter, 1:M_P_null_space]
+    }
+    
+    # Penalized components
+    if (M > M_P_null_space) {
+      idx_penalized <- (M_P_null_space + 1):M
+      S_k <- S_diag_truncated[idx_penalized]
+      
+      scale_factor <- 1.0 / sqrt(1.0 + alpha_iter * S_k + 1e-10)
+      z_iter[idx_penalized] <- z_tilde_draws[iter, idx_penalized] * scale_factor
+    }
+    
+    # Project to grid
+    field_iter <- as.vector(Phi_kle_grid %*% z_iter)
+    
+    # Store
+    field_samples[iter, ] <- field_iter
+    field_mean <- field_mean + field_iter
+  }
+  
+  field_mean <- field_mean / n_iter
+  
+  # Compute quantiles for uncertainty
+  field_lower <- apply(field_samples, 2, quantile, probs = 0.025)
+  field_upper <- apply(field_samples, 2, quantile, probs = 0.975)
+  field_sd    <- apply(field_samples, 2, sd)
+  
+  return(list(
+    mean = field_mean,
+    samples = field_samples,
+    lower = field_lower,
+    upper = field_upper,
+    sd = field_sd
+  ))
+}
+
+#===================================================
+# Apply extraction functions
+#===================================================
+spde_posterior <- extract_spde_posterior(
+  mcmc_fit = spde_mcmc,
+  A_grid   = spde_tmb$A_grid)
+
+tps_posterior <- extract_tps_posterior(
+  mcmc_fit         = regTPS_KLE_mcmc,
+  Phi_kle_grid     = regTPS_KLE_tmb$Phi_kle_grid,
+  S_diag_truncated = regTPS_KLE_tmb$S_diag_truncated,
+  M_P_null_space   = regTPS_KLE_tmb$M_P_null_space)
+
 
 #========================================================
-# 2. Compute mean field at grid locations
-#========================================================
-A_grid <- spde_tmb$A_grid
-field_mean_spde <- as.vector(A_grid %*% u_mean)
-
-# Optionally compute quantiles for uncertainty
-field_q_spde <- apply(u_post %*% t(A_grid), 2,
-                 quantile, probs = c(0.025, 0.5, 0.975))
-field_q_spde <- t(field_q_spde)  # grid_points × 3
-
-#========================================================
-# 3. Build data frame for plotting
+# Build data frame for plotting
 #========================================================
 grid_total <- regTPS_KLE_tmb$grid_total
 
 df_grid <- grid_total %>%
-  mutate(mean = field_mean_spde,
-         q025 = field_q_spde[,1],
-         median = field_q_spde[,2],
-         q975 = field_q_spde[,3])
+  mutate(mean = spde_posterior$mean,
+         q025 = spde_posterior$lower,
+         median = median(spde_field_samples),
+         q975 = spde_posterior$upper)
 
 #========================================================
-# 4. Plot with ggplot2
+# Plot with ggplot2
 #========================================================
 plot1 <- ggplot() +
   geom_raster(data = df_grid, aes(x = s1, y = s2, fill = mean)) +
@@ -266,37 +378,18 @@ plot1 <- ggplot() +
 
 
 #========================================================
-#  Extract posterior samples of z (KLE coefficients)
-#========================================================
-z_post <- rstan::extract(regTPS_KLE_mcmc)$z   # matrix: iterations × M_truncation
-
-# Posterior mean for z
-z_mean <- colMeans(z_post)
-
-#========================================================
-# 2. Compute mean field at grid locations
-#========================================================
-Phi_KLE_grid <- regTPS_KLE_tmb$Phi_kle_grid
-field_mean_regTPS_KLE <- as.vector(Phi_KLE_grid %*% z_mean)
-
-# Optionally compute quantiles for uncertainty
-field_q_regTPS_KLE <- apply(z_post %*% t(Phi_KLE_grid), 2,
-                      quantile, probs = c(0.025, 0.5, 0.975))
-field_q_regTPS_KLE <- t(field_q_regTPS_KLE)  # grid_points × 3
-
-#========================================================
-# 3. Build data frame for plotting
+# Build data frame for plotting
 #========================================================
 grid_total <- regTPS_KLE_tmb$grid_total
 
 df_grid2 <- grid_total %>%
-  mutate(mean = field_mean_regTPS_KLE,
-         q025 = field_q_regTPS_KLE[,1],
-         median = field_q_regTPS_KLE[,2],
-         q975 = field_q_regTPS_KLE[,3])
+  mutate(mean = tps_posterior$mean,
+         q025 = tps_posterior$lower,
+         median = median(tps_posterior$samples),
+         q975 = tps_posterior$upper)
 
 #========================================================
-# 4. Plot with ggplot2
+# Plot with ggplot2
 #========================================================
 plot2 <- ggplot() +
   geom_raster(data = df_grid2, aes(x = s1, y = s2, fill = mean)) +
@@ -324,12 +417,12 @@ grid.arrange(plot1, plot2, ncol = 1)
 #========================================================
 # 1. Extract posterior samples 
 #========================================================
-u_raw_post      <- rstan::extract(spde_mcmc)$u_raw        # iterations × n_nodes
+u_tilde_post      <- rstan::extract(spde_mcmc)$u_tilde        # iterations × n_nodes
 logrho_post     <- rstan::extract(spde_mcmc)$logrho       # iterations
 logsigma_u_post <- rstan::extract(spde_mcmc)$logsigma_u   # iterations
 
-niter     <- nrow(u_raw_post)
-n_nodes   <- ncol(u_raw_post)
+niter     <- nrow(u_tilde_post)
+n_nodes   <- ncol(u_tilde_post)
 A_grid    <- spde_tmb$A_grid   # sparse projection matrix mesh -> grid
 
 # Convert to dense for matrix multiply
@@ -349,7 +442,7 @@ y_grid_samples <- matrix(NA_real_, nrow = niter, ncol = n_grid)
 #========================================================
 for(it in seq_len(niter)){
   
-  u_raw_it <- u_raw_post[it, ]
+  u_tilde_it <- u_tilde_post[it, ]
   
   # reconstruct tau
   rho_it     <- exp(logrho_post[it])
@@ -358,7 +451,7 @@ for(it in seq_len(niter)){
   tau_it     <- 1 / (kappa_it * sigma_u_it)
   
   # non-centered -> centred
-  u_it <- u_raw_it / tau_it
+  u_it <- u_tilde_it / tau_it
   
   # project to grid: (n_grid × n_nodes) %*% (n_nodes) -> (n_grid)
   y_grid_samples[it, ] <- as.numeric(A_grid_dense %*% u_it)
@@ -382,9 +475,6 @@ df_spde <- data.frame(regTPS_KLE_tmb$grid_total[, 1],
                       y_summary[, "q025"], y_summary[, "median"], y_summary[, "q975"])
 colnames(df_spde) <- c("s1", "s2",  "q025", "median", "q975")
 
-# df_spde$q025   <- y_summary[, "q025"]
-# df_spde$median <- y_summary[, "median"]
-# df_spde$q975   <- y_summary[, "q975"]
 
 #========================================================
 # 5. Plot with ggplot2
@@ -407,28 +497,11 @@ plot1 <- ggplot(df_spde) +
   labs(title = "Posterior Median GRF") +
   theme_minimal()
 
-# Example: plot width of 95% credible interval
-# ggplot(df_spde) +
-#   geom_raster(aes(x = s1, y = s2, fill = q975 - q025)) +
-#   geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-#   scale_fill_viridis_c(option = "C") +
-#   coord_sf() +
-#   labs(title = "Uncertainty (95% CI Width)") +
-#   theme_minimal()
 
 
 
 
 
-
-# ---------------------------
-# 0. Objects you must have:
-# - regTPS_KLE_mcmc : stan/tmbstan fit object
-# - regTPS_KLE_tmb$m  or similar containing: Phi_kle_grid (grid_points x M_trunc)
-# - S_diag_truncated   : numeric vector length M_trunc
-# - M_P_null_space     : integer
-# - df_spde            : data.frame for the grid with columns s1, s2
-# ---------------------------
 
 post <- rstan::extract(regTPS_KLE_mcmc)
 names(post)    # diagnostic: see which variables are present
@@ -436,18 +509,18 @@ names(post)    # diagnostic: see which variables are present
 # -------------------------------------------------------
 # 1) find available posterior arrays
 # -------------------------------------------------------
-has_z_raw <- "z_raw" %in% names(post)
+has_z_tilde <- "z_tilde" %in% names(post)
 has_z     <- "z" %in% names(post)
 has_logalpha <- "logalpha" %in% names(post)
 has_alpha <- "alpha" %in% names(post)
 
-if(! (has_z_raw || has_z) ) stop("Posterior contains neither 'z_raw' nor 'z'. Available: ", paste(names(post), collapse=", "))
-if(!(has_logalpha || has_alpha)) stop("Posterior does not contain 'logalpha' or 'alpha' required to reconstruct z from z_raw.")
+if(! (has_z_tilde || has_z) ) stop("Posterior contains neither 'z_tilde' nor 'z'. Available: ", paste(names(post), collapse=", "))
+if(!(has_logalpha || has_alpha)) stop("Posterior does not contain 'logalpha' or 'alpha' required to reconstruct z from z_tilde.")
 
 # pick the right variables
-if(has_z_raw){
-  z_raw_post <- post$z_raw      # iterations x M_trunc
-  cat("Using z_raw from posterior.\n")
+if(has_z_tilde){
+  z_tilde_post <- post$z_tilde      # iterations x M_trunc
+  cat("Using z_tilde from posterior.\n")
 } else {
   z_post_direct <- post$z       # iterations x M_trunc
   cat("Using z (directly) from posterior.\n")
@@ -462,9 +535,9 @@ if(has_logalpha){
 }
 
 # Dimensions
-if(exists("z_raw_post")){
-  niter <- nrow(z_raw_post)
-  M_trunc <- ncol(z_raw_post)
+if(exists("z_tilde_post")){
+  niter <- nrow(z_tilde_post)
+  M_trunc <- ncol(z_tilde_post)
 } else {
   niter <- nrow(z_post_direct)
   M_trunc <- ncol(z_post_direct)
@@ -501,7 +574,7 @@ if(ncol(Phi_mat) == M_trunc){
 y_grid_samples <- matrix(NA_real_, nrow = niter, ncol = n_grid)
 
 # -------------------------------------------------------
-# 3) If needed, reconstruct z from z_raw and alpha for each iteration
+# 3) If needed, reconstruct z from z_tilde and alpha for each iteration
 # -------------------------------------------------------
 # Precompute S_diag_truncated vector (length M_trunc)
 S_vec <- regTPS_KLE_tmb$tmb_data$S_diag_truncated
@@ -512,8 +585,8 @@ if(length(S_vec) != M_trunc) stop("Length of S_diag_truncated (", length(S_vec),
 
 # Loop
 for(it in seq_len(niter)){
-  if(exists("z_raw_post")){
-    z_raw_it <- z_raw_post[it, ]       # length M_trunc
+  if(exists("z_tilde_post")){
+    z_tilde_it <- z_tilde_post[it, ]       # length M_trunc
     alpha_it <- alpha_post[it]         # scalar
     
     # build prior scaling vector: prior_sd_k = sqrt(1 / (1 + alpha * S_k))
@@ -522,7 +595,7 @@ for(it in seq_len(niter)){
       k_idx <- (M_P_null_space + 1):M_trunc   # R 1-based
       prior_sd[k_idx] <- sqrt( 1 / (1 + alpha_it * S_vec[k_idx]) )
     }
-    z_it <- prior_sd * z_raw_it
+    z_it <- prior_sd * z_tilde_it
   } else {
     # we already have z directly
     z_it <- z_post_direct[it, ]
@@ -562,11 +635,6 @@ df_regTPS_KLE <- data.frame(regTPS_KLE_tmb$grid_total[, 1],
                       regTPS_KLE_tmb$grid_total[, 2],
                       y_summary[, "q025"], y_summary[, "median"], y_summary[, "q975"])
 colnames(df_regTPS_KLE) <- c("s1", "s2",  "q025", "median", "q975")
-
-# 
-# df_spde$q025   <- y_summary[, "q025"]
-# df_spde$median <- y_summary[, "median"]
-# df_spde$q975   <- y_summary[, "q975"]
 
 # Quick plot example (median)
 library(ggplot2)
@@ -740,27 +808,6 @@ library(ggplot2)
 library(dplyr)
 library(tidyr) # For pivot_longer
 
-#========================================================
-# 1. Create and prepare the dataframes
-#
-# NOTE: Assumes 'regTPS_KLE_tmb' and 'y_summary' are available.
-#========================================================
-# df_spde <- data.frame(regTPS_KLE_tmb$grid_total[, 1],
-#                       regTPS_KLE_tmb$grid_total[, 2],
-#                       y_summary[, "q025"], y_summary[, "median"], y_summary[, "q975"])
-# colnames(df_spde) <- c("s1", "s2", "q025", "median", "q975")
-# 
-# df_regTPS_KLE <- data.frame(regTPS_KLE_tmb$grid_total[, 1],
-#                             regTPS_KLE_tmb$grid_total[, 2],
-#                             y_summary[, "q025"], y_summary[, "median"], y_summary[, "q975"])
-# colnames(df_regTPS_KLE) <- c("s1", "s2", "q025", "median", "q975")
-# 
-# # Square the quantile values for both dataframes
-# df_spde <- df_spde %>%
-#   mutate(across(c(q025, median, q975), ~ .x^2))
-# 
-# df_regTPS_KLE <- df_regTPS_KLE %>%
-#   mutate(across(c(q025, median, q975), ~ .x^2))
 
 #========================================================
 # 2. Combine and reshape the data into a long format
@@ -789,7 +836,7 @@ df_combined_long$model <- factor(df_combined_long$model, levels = c("SPDE", "reg
 
 
 library(ggh4x)
-plot8 <- ggplot(df_combined_long) +
+plot11 <- ggplot(df_combined_long) +
   geom_raster(aes(x = s1, y = s2, fill = value)) +
   geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.7) +
   geom_point(data = coords, aes(x = s1, y = s2),
@@ -801,24 +848,26 @@ plot8 <- ggplot(df_combined_long) +
   coord_sf() +
   facet_grid(quantile_type ~ model) + # Changed from facet_wrap to facet_grid
   theme_grey() +
-  labs(fill = "Value") + 
+  labs(fill = expression(NO[2]~Values)) +  # Expression with subscript
   theme(legend.title=element_text(size=18), 
         legend.text = element_text(size=16), 
         axis.title.x = element_text(size = 16),
         axis.title.y = element_text(size = 16),
         strip.text.x = element_text(size = 18),
-        strip.text.y = element_text(size = 16),
-        axis.text = element_text(size = 12)) +
+        strip.text.y = element_text(size = 18),
+        axis.text = element_text(size = 12),
+        strip.background = element_rect(fill = "gray90")) +
   force_panelsizes(rows = c(3, 3, 3),
                    cols = c(4, 4, 4))
 
-plot8
+plot11
+
 
 # Save as high-quality PDF
-ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot8.pdf",
-       plot = plot8,        # Replace with your ggplot object name
+ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot11.pdf",
+       plot = plot11,        # Replace with your ggplot object name
        device = cairo_pdf,    # Good for embedding text as text
-       width = 13,             # Width in inches
-       height = 13,            # Height in inches
+       width = 12,             # Width in inches
+       height = 12,            # Height in inches
        dpi = 300              # Only affects raster elements, safe to keep high
 )

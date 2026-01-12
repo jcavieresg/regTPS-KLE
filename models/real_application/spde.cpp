@@ -71,7 +71,6 @@ Type objective_function<Type>::operator() ()
   //=========================
   DATA_VECTOR(y);                       // Observed data
   DATA_SPARSE_MATRIX(A_obs);            // Projection matrix for observations
-  // DATA_SPARSE_MATRIX(A_grid);           // Projection matrix for grid prediction
   DATA_STRUCT(spde_mat, spde_t);        // Three matrices needed for representing the GMRF, see p. 8 in Lindgren et al. (2011)
   
   DATA_SCALAR(rho0);        // user-specified, e.g. 10 (units of distance)
@@ -81,16 +80,10 @@ Type objective_function<Type>::operator() ()
   
   DATA_SCALAR(cauchy_scale_e); // e.g. 5.0 (unused if using PC exponential obs prior)
   
-  // DATA_SCALAR(lambda_rho);
-  // DATA_SCALAR(lambda_sigma_u);
-  
+
   //=========================
   //   PARAMETER SECTION
   //=========================
-  // PARAMETER(sigma_e);
-  // PARAMETER(rho);
-  // PARAMETER(sigma_u);
-  
   PARAMETER(logsigma_e);
   PARAMETER(logrho);
   PARAMETER(logsigma_u);
@@ -100,59 +93,27 @@ Type objective_function<Type>::operator() ()
   Type sigma_u = exp(logsigma_u);
   
   // Parameter vector for spatial field
-  //PARAMETER_VECTOR(u);
-  PARAMETER_VECTOR(u_raw);
+  PARAMETER_VECTOR(u_tilde);
 
 // For PC priors
   Type lambda_rho_inv = -rho0 * log(alpha_rho);    // for Exp on rho^{-1}
   Type lambda_sigma_u = -log(alpha_s_u) / s0_u;    // for Exp on sigma_u
-  
-  // Type rho_inv = Type(1.0)/rho;
-  // Type lambda_rho_inv = Type(1.0)/lambda_rho;
   
 
   // ===================================
   //               Priors
   // ===================================
   Type nlp = 0.0;
-  
-  // // Prior on sigma (Half-normal)
-  // nlp -= dnorm(sigma_e,   Type(0.0), Type(1.0), true);
-  // 
-  // // Prior for rho and Jacobian adjustment
-  // nlp -= dweibull(rho_inv,  lambda_rho_inv, Type(1.0), true);   //
-  // nlp += 2*log(rho);
-  // 
-  // // Prior for sigma_u
-  // nlp -= dexp(sigma_u,      lambda_sigma_u,     true);
-
-
-  // range prior via exponential on rho^{-1} (implemented as logpdf of X=1/rho)
-  // 1) Prior on observation sd sigma_e: use PC prior (exponential) on sigma_e
-  //    We parameterize via log_sigma_e. Need to include Jacobian term: log|d sigma_e / d log_sigma_e| = log_sigma_e
-  //nlp -= dexp(sigma_e, lambda_sigma_e, true);   // subtract log p(sigma_e)
-  //nlp -= log_sigma_e;                           // subtract log jacobian (-> add negative log jacobian)
-
   // If you prefer half-Cauchy for sigma_e instead, comment the above two lines and uncomment:
   nlp -= dcauchy_stable(sigma_e, Type(0.0), cauchy_scale_e, true);
   nlp -= logsigma_e; // Jacobian for log-parameterization
   
-  // 2) Prior for rho expressed as exponential on rho^{-1}
-  //    X = rho^{-1} = exp(-log_rho)
   Type rho_inv = Type(1.0) / rho; // = exp(-log_rho)
-  // log prior for X:
   nlp -= dweibull(rho_inv, lambda_rho_inv, Type(1.0), true); // log p(X)
-  // Jacobian term for parameterising by log_rho:
-  // X = exp(-log_rho) => dX/d(log_rho) = -exp(-log_rho) => |dX/dt| = exp(-log_rho)
-  // log |dX/dt| = -log_rho. For negative log prior we add - log |dX/dt| = + log_rho
   nlp += logrho;
   
-  // 3) Prior for sigma_u (marginal sd of spatial field): PC exponential on sigma_u
   nlp -= dexp(sigma_u, lambda_sigma_u, true); // subtract log p(sigma_u)
   nlp -= logsigma_u;                         // subtract log jacobian (log|d sigma_u / d log_sigma_u|)
-  
-  // Optionally: weak prior on log_rho/log_sigmas to stabilise (not necessary if above are used)
-  // e.g. nlp += 0.5 * pow(log_sigma_u / 10.0, 2.0);  
 
   // Derived spatial quantities
   Type kappa = sqrt(8)/rho;
@@ -166,11 +127,9 @@ Type objective_function<Type>::operator() ()
   // Objective function is sum of negative log likelihood components
   int n = y.size();	                   // number of observations 
   Type nll_u = 0.0;		                 // likelihood for the spatial effect
-  //nll_u += SCALE(GMRF(Q), 1/ tau)(u);  // returns negative already
-  
-  nll_u += GMRF(Q)(u_raw); // u_raw has prior independent of tau
-  // Build the actual spatial field used in the linear predictor
-  vector<Type> u = u_raw / tau; // non-centered transform
+
+  nll_u += GMRF(Q)(u_tilde); // u_raw has prior independent of tau
+  vector<Type> u = u_tilde / tau; // non-centered transform
   
   // Linear predictor
   vector<Type> mu(n);
@@ -197,7 +156,6 @@ Type objective_function<Type>::operator() ()
     for(int i = 0; i < n; i++){
       Type y_tmp = rnorm(mu(i), sigma_e);  // simulate as usual
       y_sim(i) = pow(y_tmp, 2);                // then square it
-      // y_sim(i) = rnorm(mu(i), sigma_e);
     } 
     REPORT(y_sim);
   }
@@ -219,7 +177,7 @@ Type objective_function<Type>::operator() ()
   REPORT(Q);
   REPORT(log_lik);
   REPORT(u);
-  //REPORT(u_raw);
+  REPORT(u_tilde);
 
   
   // ADREPORT
@@ -228,7 +186,7 @@ Type objective_function<Type>::operator() ()
   ADREPORT(tau);
   ADREPORT(kappa);
   ADREPORT(u);
-  //ADREPORT(u_raw);
+  ADREPORT(u_tilde);
 
   return jnll;
 }
