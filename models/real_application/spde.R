@@ -1,6 +1,7 @@
 rm(list = ls())
 setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application")
 
+
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
                TMB, tmbstan, mgcv, MASS, INLA, rSPDE, fmesher,
@@ -26,9 +27,12 @@ run_tmb_spde <- function(sp_data, dim_grid){
 set.seed(1234)
   
   # Convert sp_points to matrix
+  # sp_matrix <- as.matrix(sp_data[, c(1:2)])
+  # mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.25, max.edge = c(1, 1.5)) 
+  # 
   sp_matrix <- as.matrix(sp_data[, c(1:2)])
-  mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.286, max.edge = c(1, 1.5)) 
-
+  mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.3, max.edge = c(1, 1.5)) 
+  
   
   #====================================================
   # Grid points
@@ -182,10 +186,45 @@ plot(germany_border$geometry)
 plot(sp_points_germany, add = TRUE, col = "red", pch = 20)
 
 
+# ===============================
+# Observation points
+# ===============================
+sp_matrix <- as.matrix(sp_df[, c("x", "y")])
+sp_df <- data.frame(
+  x = sp_matrix[, 1],
+  y = sp_matrix[, 2])
 
-mesh = inla.mesh.2d(loc = sp_data[, c(1:2)], cutoff = 0.286, max.edge = c(1, 1.5))
-plot(mesh); points(sp_data[, c(1:2)], col = "red")
-mesh$n
+
+mesh <- inla.mesh.2d(loc = sp_matrix, cutoff = 0.3, max.edge = c(1, 1.5))
+
+# -----------------------
+# Plot mesh over Germany
+# -----------------------
+plot_mesh <- ggplot() +
+  geom_fm(data = mesh, linewidth = 0.4) +
+  geom_point(data = sp_df, aes(x = x, y = y), color = "red", size = 1.8) +
+  labs(
+    title = paste("Spatial mesh (n =", mesh$n, "nodes)"),
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(size = 16, hjust = 0.5)) 
+
+plot_mesh
+
+# ===============================
+# Save as high-quality PDF
+# ===============================
+ggsave(
+  filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot_mesh.pdf",
+  plot = plot_mesh,
+  device = cairo_pdf,
+  width = 6,
+  height = 6,
+  dpi = 300)
+
+
 
 
 #======================================================

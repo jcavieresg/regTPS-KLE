@@ -7,7 +7,7 @@ options(scipen = 999)
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
                TMB, tmbstan, mgcv, MASS, INLA, rstan, Matrix, fields, reshape2,
-               patchwork, purrr, kableExtra)
+               patchwork, purrr, kableExtra, gridExtra)
 
 # Calculate the number of cores
 no_cores <- parallelly::availableCores() - 1  
@@ -44,14 +44,14 @@ mon_tps_mat4 = monitor(mcmc_tps_mat4)
 
 
 # The numbers are the minutes per model (spde/regTPS-KLE)
-eff_spde_mat1 <- log(sum(mon_spde_mat1$n_eff)/4.79)
-eff_spde_mat2 <- log(sum(mon_spde_mat2$n_eff)/5.20)
-eff_spde_mat3 <- log(sum(mon_spde_mat3$n_eff)/11.21)
-eff_spde_mat4 <- log(sum(mon_spde_mat4$n_eff)/24.23)
-eff_tps_mat1 <- log(sum(mon_tps_mat1$n_eff)/1.12)
-eff_tps_mat2 <- log(sum(mon_tps_mat2$n_eff)/4.67)
-eff_tps_mat3 <- log(sum(mon_tps_mat3$n_eff)/8.20)
-eff_tps_mat4 <- log(sum(mon_tps_mat4$n_eff)/12.15)
+eff_spde_mat1 <- log(sum(mon_spde_mat1$n_eff)/2.45)
+eff_spde_mat2 <- log(sum(mon_spde_mat2$n_eff)/2.49)
+eff_spde_mat3 <- log(sum(mon_spde_mat3$n_eff)/8.97)
+eff_spde_mat4 <- log(sum(mon_spde_mat4$n_eff)/20.05)
+eff_tps_mat1 <- log(sum(mon_tps_mat1$n_eff)/0.84)
+eff_tps_mat2 <- log(sum(mon_tps_mat2$n_eff)/4.48)
+eff_tps_mat3 <- log(sum(mon_tps_mat3$n_eff)/7.78)
+eff_tps_mat4 <- log(sum(mon_tps_mat4$n_eff)/9.09)
 
 df_eff_spde <- rbind(eff_spde_mat1, eff_spde_mat2, eff_spde_mat3, eff_spde_mat4)
 df_eff_tps  <- rbind(eff_tps_mat1, eff_tps_mat2, eff_tps_mat3, eff_tps_mat4)
@@ -73,7 +73,10 @@ p_comp_eff_mat <- ggplot(df_plot, aes(x = SL, group = 1)) +
       "SPDE",
       "regTPS-KLE")) + 
   theme_bw(base_size = 14) +
-  labs(x = "Scenarios", y = "log(Comp. efficiency)", title="Computational Efficiency (Matern)") +
+  labs(x = "Scenarios", 
+       # y = "log(Comp. efficiency)",
+       y = expression(log(ESS / minutes)),
+  title="Computational Efficiency (Matern)") +
   # subtitle = "Matérn") + 
   theme(plot.title = element_text(color="black", size=16, face = "bold", hjust = 0.5),
         plot.subtitle = element_text(size = 14, hjust = 0.5),
@@ -118,14 +121,14 @@ mon_tps_exp4 = monitor(mcmc_tps_exp4)
 
 
 # The numbers are the minutes per model (spde/regTPS-KLE)
-eff_spde_exp1 <- log(sum(mon_spde_exp1$n_eff)/5.78)
-eff_spde_exp2 <- log(sum(mon_spde_exp2$n_eff)/5.91)
-eff_spde_exp3 <- log(sum(mon_spde_exp3$n_eff)/3.85)
-eff_spde_exp4 <- log(sum(mon_spde_exp4$n_eff)/26.08)
-eff_tps_exp1 <- log(sum(mon_tps_exp1$n_eff)/1.38)
-eff_tps_exp2 <- log(sum(mon_tps_exp2$n_eff)/4.45)
-eff_tps_exp3 <- log(sum(mon_tps_exp3$n_eff)/8.02)
-eff_tps_exp4 <- log(sum(mon_tps_exp4$n_eff)/11.67)
+eff_spde_exp1 <- log(sum(mon_spde_exp1$n_eff)/3.02)
+eff_spde_exp2 <- log(sum(mon_spde_exp2$n_eff)/4.05)
+eff_spde_exp3 <- log(sum(mon_spde_exp3$n_eff)/4.00)
+eff_spde_exp4 <- log(sum(mon_spde_exp4$n_eff)/13.94)
+eff_tps_exp1 <- log(sum(mon_tps_exp1$n_eff)/1.45)
+eff_tps_exp2 <- log(sum(mon_tps_exp2$n_eff)/4.65)
+eff_tps_exp3 <- log(sum(mon_tps_exp3$n_eff)/8.08)
+eff_tps_exp4 <- log(sum(mon_tps_exp4$n_eff)/9.71)
 
 df_eff_spde_exp <- rbind(eff_spde_exp1, eff_spde_exp2, eff_spde_exp3, eff_spde_exp4)
 df_eff_tps_exp  <- rbind(eff_tps_exp1, eff_tps_exp2, eff_tps_exp3, eff_tps_exp4)
@@ -147,7 +150,9 @@ p_comp_eff_exp <- ggplot(df_plot_exp, aes(x = SL, group = 1)) +
       "SPDE",
       "regTPS-KLE")) + 
   theme_bw(base_size = 14) +
-  labs(x = "Scenarios", y = "log(Comp. efficiency)", title="Computational Efficiency (Exponential)") +
+  labs(x = "Scenarios", 
+       # y = "log(Comp. efficiency)",
+       y = expression(log(ESS / minutes)), title="Computational Efficiency (Exponential)") +
        # subtitle = "Exponential Covariance Function") + 
   theme(plot.title = element_text(color="black", size=16, face = "bold", hjust = 0.5),
         plot.subtitle = element_text(size = 14, hjust = 0.5),
@@ -215,7 +220,7 @@ p_facet_by_cov <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   ) + 
   labs(
     x = "Scenario", 
-    y = "log(Computational Efficiency)",
+    y = expression(log(ESS / min)),
     title = "Computational Efficiency Comparison"
   ) + 
   my_theme +
@@ -233,7 +238,7 @@ p_facet_by_method <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   ) + 
   labs(
     x = "Scenario", 
-    y = "log(Computational Efficiency)",
+    y = expression(log(ESS / min)),
     title = "Computational Efficiency by Method"
   ) + 
   my_theme +
@@ -251,7 +256,7 @@ p_facet_grid <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   ) + 
   labs(
     x = "Scenario", 
-    y = "log(Computational Efficiency)",
+    y = expression(log(ESS / min)),
     title = "Computational Efficiency: All Combinations"
   ) + 
   my_theme +
@@ -270,7 +275,7 @@ p_facet_horizontal <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   ) + 
   labs(
     x = "Scenario", 
-    y = "log(Computational Efficiency)",
+    y = expression(log(ESS / min)),
     title = "Computational Efficiency Comparison"
   ) + 
   my_theme +
@@ -372,7 +377,7 @@ p_comp_eff <- ggplot(
   theme_bw(base_size = 14) +
   labs(
     x = "Scenarios",
-    y = "log(Comp. efficiency)",
+    y = expression(log(sum(n[eff])/minutes)),
     title = "Computational Efficiency Comparison"
   ) +
   theme(
@@ -394,7 +399,7 @@ p_comp_eff
 
 
 # Save as high-quality PDF
-ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot7_b.pdf",
+ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot8.pdf",
        plot = p_comp_eff,        # Replace with your ggplot object name
        device = cairo_pdf,    # Good for embedding text as text
        width = 8,             # Width in inches

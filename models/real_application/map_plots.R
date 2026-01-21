@@ -4,106 +4,6 @@ rm(list = ls())
 options(scipen = 999)
 
 
-
-# Diagnostic functions to check model performance
-check_model_diagnostics <- function(result, sp_data) {
-  
-  cat("=== MODEL DIAGNOSTICS ===\n")
-  
-  # Extract fitted values and residuals
-  obj <- result$obj
-  rep <- result$rep_tmb
-  
-  # Get fitted values
-  fitted_vals <- obj$report()$field_sp
-  residuals <- sqrt(sp_data$y_obs) - fitted_vals
-  
-  # Basic diagnostics
-  cat(paste0("Number of observations: ", nrow(sp_data), "\n"))
-  cat(paste0("Number of basis functions: ", result$M_truncation, "\n"))
-  cat(paste0("Null space dimension: ", result$M_P_null_space, "\n"))
-  cat(paste0("Explained variance: ", round(result$explained_variance, 3), "\n"))
-  
-  # Parameter estimates
-  sigma_est <- exp(result$opt$par[["logsigma"]])
-  alpha_est <- exp(result$opt$par[["logalpha"]])
-  cat(paste0("Estimated sigma: ", round(sigma_est, 4), "\n"))
-  cat(paste0("Estimated alpha: ", round(alpha_est, 4), "\n"))
-  
-  # Model fit statistics
-  rmse <- sqrt(mean(residuals^2))
-  mae <- mean(abs(residuals))
-  cat(paste0("RMSE: ", round(rmse, 4), "\n"))
-  cat(paste0("MAE: ", round(mae, 4), "\n"))
-  
-  # Check for convergence issues
-  if(result$opt$convergence != 0) {
-    cat("WARNING: Optimization did not converge properly!\n")
-  }
-  
-  # Return diagnostic plots data
-  return(list(
-    fitted = fitted_vals,
-    residuals = residuals,
-    spatial_coords = sp_data[, c("s1", "s2")],
-    rmse = rmse,
-    mae = mae
-  ))
-}
-
-# Function to create diagnostic plots
-plot_diagnostics <- function(diagnostics, sp_data) {
-  
-  par(mfrow = c(2, 2))
-  
-  # 1. Fitted vs Observed
-  plot(sqrt(sp_data$y_obs), diagnostics$fitted,
-       xlab = "Observed (sqrt scale)", ylab = "Fitted",
-       main = "Fitted vs Observed")
-  abline(0, 1, col = "red", lwd = 2)
-  
-  # 2. Residuals vs Fitted
-  plot(diagnostics$fitted, diagnostics$residuals,
-       xlab = "Fitted values", ylab = "Residuals",
-       main = "Residuals vs Fitted")
-  abline(h = 0, col = "red", lwd = 2)
-  
-  # 3. Q-Q plot of residuals
-  qqnorm(diagnostics$residuals, main = "Normal Q-Q Plot of Residuals")
-  qqline(diagnostics$residuals, col = "red", lwd = 2)
-  
-  # 4. Histogram of residuals
-  hist(diagnostics$residuals, breaks = 20,
-       main = "Histogram of Residuals", xlab = "Residuals")
-  
-  par(mfrow = c(1, 1))
-}
-
-
-
-
-# Usage example:
-# After running your model:
-# results <- regTPS_KLE(N_sp = nrow(sp_data),
-#                       sp_data = sp_data,
-#                       dim_grid = 30,
-#                       n_basis_app = 0.9,
-#                       var_threshold = 0.95)
-
-
-
-diag <- check_model_diagnostics(results, sp_data)
-plot_diagnostics(diag, sp_data)
-
-
-
-
-setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs")
-rm(list = ls())
-
-options(scipen = 999)
-
-
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
                TMB, tmbstan, mgcv, MASS, INLA, rstan, Matrix, fields, sf,
@@ -359,7 +259,7 @@ grid_total <- regTPS_KLE_tmb$grid_total
 df_grid <- grid_total %>%
   mutate(mean = spde_posterior$mean,
          q025 = spde_posterior$lower,
-         median = median(spde_field_samples),
+         median = median(spde_posterior$samples),
          q975 = spde_posterior$upper)
 
 #========================================================
@@ -841,24 +741,28 @@ plot11 <- ggplot(df_combined_long) +
   geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.7) +
   geom_point(data = coords, aes(x = s1, y = s2),
              color = "black", size = 1.5, alpha = 0.7) +
-  # scale_fill_viridis_c(option = "C", name = "Value") +
-  # scale_fill_viridis_c(option = "magma") +
   scale_fill_viridis_c(option = "C") +
-  # scale_fill_viridis_c() +
   coord_sf() +
-  facet_grid(quantile_type ~ model) + # Changed from facet_wrap to facet_grid
+  facet_grid(quantile_type ~ model) +
   theme_grey() +
-  labs(fill = expression(NO[2]~Values)) +  # Expression with subscript
-  theme(legend.title=element_text(size=18), 
-        legend.text = element_text(size=16), 
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        strip.text.x = element_text(size = 18),
-        strip.text.y = element_text(size = 18),
-        axis.text = element_text(size = 12),
-        strip.background = element_rect(fill = "gray90")) +
+  labs(
+    x = "Longitude",
+    y = "Latitude",
+    fill = expression(NO[2]~Values)
+  ) +
+  theme(
+    legend.title = element_text(size = 18), 
+    legend.text  = element_text(size = 16), 
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    strip.text.x = element_text(size = 18),
+    strip.text.y = element_text(size = 18),
+    axis.text    = element_text(size = 12),
+    strip.background = element_rect(fill = "gray90")
+  ) +
   force_panelsizes(rows = c(3, 3, 3),
                    cols = c(4, 4, 4))
+
 
 plot11
 

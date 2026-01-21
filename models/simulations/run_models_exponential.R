@@ -25,12 +25,6 @@ dyn.load(dynlib("tps_kle"))
 
 
 
-#==================================
-# Compile the model and load it
-# compile("tps_kle2.cpp")
-# dyn.load(dynlib("tps_kle2"))
-
-
 #=====================================================================================
 #                               Main Functions
 #=====================================================================================
@@ -115,7 +109,7 @@ run_tmb_spde <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true, u_grid,
 #=========================
 
 run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, k_basis, Cov_true,
-                        mass_M = FALSE, variance_threshold = 0.95) {
+                        variance_threshold = 0.95) {
   
   n_nodes <- mesh$n
   # Setup Basis and Penalty
@@ -135,48 +129,15 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   S <- sm$S[[1]]
   
   #====================================
-  # EIGENDECOMPOSITION: Two approaches
+  # STANDARD EIGENDECOMPOSITION
   #====================================
   
-  if(mass_M == TRUE) {
-    # OPTION 1: Generalized eigenvalue problem with mass matrix (L^2 geometry)
-    cat("  Using GENERALIZED eigenvalue problem with mass matrix (L^2 geometry)\n")
-    
-    # Approximate mass matrix via Monte Carlo integration
-    n_int <- 5000
-    set.seed(123)
-    s_int <- data.frame(s1 = runif(n_int, 0, 1), s2 = runif(n_int, 0, 1))
-    Phi_int <- PredictMat(sm, s_int)
-    M_mass <- t(Phi_int) %*% Phi_int / n_int
-    
-    # Add small regularization for numerical stability
-    M_mass <- M_mass + 1e-10 * diag(nrow(M_mass))
-    
-    # Solve generalized eigenvalue problem: S ψ = v M ψ
-    if(!require(geigen, quietly = TRUE)) {
-      stop("Package 'geigen' required for mass matrix approach. Install with: install.packages('geigen')")
-    }
-    
-    eig_result <- geigen(S, M_mass, symmetric = TRUE)
-    S_diag <- Re(eig_result$values)
-    evectors <- Re(eig_result$vectors)
-    
-    # Store mass matrix for output
-    M_mass_out <- M_mass
-  }
+  cat("  Using standard eigenvalue problem (S ψ = v ψ)\n")
   
-  if(mass_M == FALSE) {
-    # OPTION 2: Standard eigenvalue problem (RKHS geometry, M ≈ I)
-    cat("  Using STANDARD eigenvalue problem (RKHS geometry, M ≈ I)\n")
-    
-    # Standard eigendecomposition: S ψ = v ψ
-    S_eig <- eigen(S, symmetric = TRUE)
-    S_diag <- S_eig$values
-    evectors <- S_eig$vectors
-    
-    # No mass matrix computed
-    M_mass_out <- NULL
-  }
+  # Standard eigendecomposition: S ψ = v ψ
+  S_eig <- eigen(S, symmetric = TRUE)
+  S_diag <- S_eig$values
+  evectors <- S_eig$vectors
   
   #====================================
   # CLEAN AND ORDER EIGENVALUES
@@ -189,15 +150,12 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   if(any(S_diag < -1e-10)) {
     warning("Negative eigenvalues detected (max magnitude: ", 
             max(abs(S_diag[S_diag < 0])), ")")
-    if(mass_M) {
-      warning("  This often indicates issues with mass matrix approximation")
-    }
   }
   S_diag[S_diag < 0] <- 0
   
-  # CRITICAL: Order by INCREASING eigenvalue (smooth to rough)
-  # Smallest eigenvalues = null space (unpenalized, v_k ≈ 0)
-  # Larger eigenvalues = rougher functions (more penalized, v_k > 0)
+  # Order by INCREASING eigenvalue (smooth to rough)
+  # Smallest eigenvalues = null space (v_k ≈ 0)
+  # Larger eigenvalues = rougher functions (v_k > 0)
   order_idx <- order(S_diag, decreasing = FALSE)
   S_diag <- S_diag[order_idx]
   evectors <- evectors[, order_idx]
@@ -228,7 +186,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   
   cat("  Estimated alpha for truncation:", round(alpha_est, 4), "\n")
   
-  # Compute implied KLE eigenvalues: lambda_k = 1/(1 + alpha * v_k)
+  # Compute KLE eigenvalues: lambda_k = 1/(1 + alpha * v_k)
   lambda_k <- 1 / (1 + alpha_est * S_diag)
   
   # For null space (v_k ≈ 0), lambda_k ≈ 1
@@ -238,8 +196,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   total_variance <- sum(lambda_k)
   cumvar <- cumsum(lambda_k) / total_variance
   
-  # Find truncation point (99% variance)
-  variance_threshold <- variance_threshold
+  # Find truncation point
   M_truncation <- which(cumvar >= variance_threshold)[1]
   
   if(is.na(M_truncation)) {
@@ -290,40 +247,41 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   if(length(valid_eigs) > 0) {
     # Use 25th percentile for robustness
     target_eig <- quantile(valid_eigs, 0.25)
+    # For mass matrix: lambda ≈ 1/(alpha*v) for large alpha*v
     logalpha_init <- log(signal_var / target_eig)
   } else {
     logalpha_init <- 0
   }
   
   # Bound initial values
-  logalpha_init <- pmax(pmin(logalpha_init, 3), -3)
-  
-  cat("  Initial sigma:", round(exp(logsigma_init), 4), "\n")
-  cat("  Initial alpha:", round(exp(logalpha_init), 4), "\n")
+  logsigma_init <- pmax(pmin(logsigma_init, 5), -5)
+  logalpha_init <- pmax(pmin(logalpha_init, 5), -5)
   
   #====================================
   # TMB DATA
   #====================================
-  
-  # PC prior specification
-  sigma_prior_s0    <- 0.5
-  sigma_prior_alpha <- 0.05
+  sigma_prior_s0    <- 0.5   # Upper threshold for sigma
+  sigma_prior_alpha <- 0.05  # P(sigma > 0.5) = 0.05
   lambda_sigma <- -log(sigma_prior_alpha) / sigma_prior_s0
   
-  tmb_data <- list(y_obs = y_obs,
-                   Phi_kle_sp = Phi_kle_sp,
-                   Phi_kle_grid = Phi_kle_grid,
-                   S_diag_truncated = S_diag_truncated,
-                   M_P_null_space = M_P_null_space,
-                   lambda_sigma = lambda_sigma)
+  tmb_data <- list(
+    y_obs = y_obs,
+    Phi_kle_sp = Phi_kle_sp,
+    Phi_kle_grid = Phi_kle_grid,
+    S_diag_truncated = S_diag_truncated,
+    M_P_null_space = M_P_null_space,
+    lambda_sigma = lambda_sigma
+  )
   
   #====================================
   # TMB PARAMETERS
   #====================================
   
-  tmb_par <- list(z_tilde = rep(0, M_truncation),
-                  logsigma = logsigma_init,
-                  logalpha = logalpha_init)
+  tmb_par <- list(
+    z_tilde = rep(0, M_truncation),
+    logsigma = logsigma_init,
+    logalpha = logalpha_init
+  )
   
   #====================================
   # FIT MODEL
@@ -352,15 +310,24 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   # RETURN RESULTS
   #====================================
   
-  res_list = list(obj = obj, opt = opt, rep_tmb = rep_tmb, tmb_data = tmb_data, tmb_par = tmb_par, 
-                  M_truncation = M_truncation, variance_explained = var_explained, k_basis = k_basis, n_nodes = n_nodes,
-                  u_true_sp = u_true_sp, u_true_grid = u_true_grid, 
-                  S_diag_full = S_diag, S_diag_truncated = S_diag_truncated, 
-                  lambda_k = lambda_k,  # Store KLE eigenvalues
-                  evectors = evectors,  sm = sm,
-                  M_mass = M_mass_out,  # Store mass matrix if computed
-                  mass_M_used = mass_M, # Store which method was used
-                  Cov_true = Cov_true
+  res_list <- list(
+    obj = obj, 
+    opt = opt, 
+    rep_tmb = rep_tmb, 
+    tmb_data = tmb_data, 
+    tmb_par = tmb_par, 
+    M_truncation = M_truncation, 
+    variance_explained = var_explained, 
+    k_basis = k_basis, 
+    n_nodes = n_nodes,
+    u_true_sp = u_true_sp, 
+    u_true_grid = u_true_grid, 
+    S_diag_full = S_diag, 
+    S_diag_truncated = S_diag_truncated, 
+    lambda_k = lambda_k,
+    evectors = evectors,  
+    sm = sm,
+    Cov_true = Cov_true
   )
   
   return(res_list)
@@ -433,17 +400,9 @@ for (i in 1:n_scenarios) {
   #====================================
   # COMPARISON STRATEGY FOR regTPS-KLE
   #====================================
-  # Strategy: Use maximum feasible k_basis, then let variance-based truncation
-  # select the optimal M_truncation
-  
   # Maximum k_basis for TPS (must be < N_sp)
   k_basis_max <- floor(0.99 * N_sp)  # Conservative: 99% of data points
   k_basis_max <- max(k_basis_max, 10)  # At least 10 basis functions
-  
-  # cat("\n--- TPS Model Configuration ---\n")
-  # cat("Maximum feasible k_basis:", k_basis_max, "\n")
-  # cat("  (constrained by N_sp =", N_sp, ")\n")
-  # 
   
   if(k_basis_max < n_mesh_nodes) {
     cat("Note: TPS k_basis (", k_basis_max, ") < SPDE nodes (", n_mesh_nodes, ")\n")
@@ -458,7 +417,7 @@ for (i in 1:n_scenarios) {
   obj_tps <- run_tmb_tps(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, 
                          k_basis = k_basis_max, 
                          Cov_true, 
-                         mass_M = FALSE, variance_threshold = 0.99)  # Use RKHS for stability
+                         variance_threshold = 0.99)
   
   #====================================
   # COMPARISON SUMMARY

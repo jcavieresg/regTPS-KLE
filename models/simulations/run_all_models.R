@@ -97,6 +97,7 @@ run_tmb_spde <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true, u_grid,
 
   # Return results
   res_list <- list(obj = obj_spde, opt = opt_spde, rep = rep_spde, tmb_data = tmb_data, tmb_par = tmb_par, 
+                   sp_points = sp_points,
                    mesh = mesh, spde = spde, u_true_sp = u_true_sp, u_true_grid = u_true_grid, Cov_true = Cov_true)
   return(res_list)
 }
@@ -108,7 +109,7 @@ run_tmb_spde <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true, u_grid,
 #=========================
 
 run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, k_basis, Cov_true,
-                        mass_M = FALSE, variance_threshold = 0.95) {
+                        variance_threshold = 0.95) {
   
   n_nodes <- mesh$n
   # Setup Basis and Penalty
@@ -128,48 +129,15 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   S <- sm$S[[1]]
   
   #====================================
-  # EIGENDECOMPOSITION: Two approaches
+  # STANDARD EIGENDECOMPOSITION
   #====================================
-
-  if(mass_M == TRUE) {
-    # OPTION 1: Generalized eigenvalue problem with mass matrix (L^2 geometry)
-    cat("  Using GENERALIZED eigenvalue problem with mass matrix (L^2 geometry)\n")
-    
-    # Approximate mass matrix via Monte Carlo integration
-    n_int <- 5000
-    set.seed(123)
-    s_int <- data.frame(s1 = runif(n_int, 0, 1), s2 = runif(n_int, 0, 1))
-    Phi_int <- PredictMat(sm, s_int)
-    M_mass <- t(Phi_int) %*% Phi_int / n_int
-    
-    # Add small regularization for numerical stability
-    M_mass <- M_mass + 1e-10 * diag(nrow(M_mass))
-    
-    # Solve generalized eigenvalue problem: S ψ = v M ψ
-    if(!require(geigen, quietly = TRUE)) {
-      stop("Package 'geigen' required for mass matrix approach. Install with: install.packages('geigen')")
-    }
-    
-    eig_result <- geigen(S, M_mass, symmetric = TRUE)
-    S_diag <- Re(eig_result$values)
-    evectors <- Re(eig_result$vectors)
-    
-    # Store mass matrix for output
-    M_mass_out <- M_mass
-  }
   
-  if(mass_M == FALSE) {
-    # OPTION 2: Standard eigenvalue problem (RKHS geometry, M ≈ I)
-    cat("  Using STANDARD eigenvalue problem (RKHS geometry, M ≈ I)\n")
-    
-    # Standard eigendecomposition: S ψ = v ψ
-    S_eig <- eigen(S, symmetric = TRUE)
-    S_diag <- S_eig$values
-    evectors <- S_eig$vectors
-    
-    # No mass matrix computed
-    M_mass_out <- NULL
-  }
+  cat("  Using standard eigenvalue problem (S ψ = v ψ)\n")
+  
+  # Standard eigendecomposition: S ψ = v ψ
+  S_eig <- eigen(S, symmetric = TRUE)
+  S_diag <- S_eig$values
+  evectors <- S_eig$vectors
   
   #====================================
   # CLEAN AND ORDER EIGENVALUES
@@ -182,15 +150,12 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   if(any(S_diag < -1e-10)) {
     warning("Negative eigenvalues detected (max magnitude: ", 
             max(abs(S_diag[S_diag < 0])), ")")
-    if(mass_M) {
-      warning("  This often indicates issues with mass matrix approximation")
-    }
   }
   S_diag[S_diag < 0] <- 0
   
-  # CRITICAL: Order by INCREASING eigenvalue (smooth to rough)
-  # Smallest eigenvalues = null space (unpenalized, v_k ≈ 0)
-  # Larger eigenvalues = rougher functions (more penalized, v_k > 0)
+  # Order by INCREASING eigenvalue (smooth to rough)
+  # Smallest eigenvalues = null space (v_k ≈ 0)
+  # Larger eigenvalues = rougher functions (v_k > 0)
   order_idx <- order(S_diag, decreasing = FALSE)
   S_diag <- S_diag[order_idx]
   evectors <- evectors[, order_idx]
@@ -221,7 +186,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   
   cat("  Estimated alpha for truncation:", round(alpha_est, 4), "\n")
   
-  # Compute implied KLE eigenvalues: lambda_k = 1/(1 + alpha * v_k)
+  # Compute KLE eigenvalues: lambda_k = 1/(1 + alpha * v_k)
   lambda_k <- 1 / (1 + alpha_est * S_diag)
   
   # For null space (v_k ≈ 0), lambda_k ≈ 1
@@ -231,8 +196,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   total_variance <- sum(lambda_k)
   cumvar <- cumsum(lambda_k) / total_variance
   
-  # Find truncation point (99% variance)
-  variance_threshold <- variance_threshold
+  # Find truncation point
   M_truncation <- which(cumvar >= variance_threshold)[1]
   
   if(is.na(M_truncation)) {
@@ -283,6 +247,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   if(length(valid_eigs) > 0) {
     # Use 25th percentile for robustness
     target_eig <- quantile(valid_eigs, 0.25)
+    # For mass matrix: lambda ≈ 1/(alpha*v) for large alpha*v
     logalpha_init <- log(signal_var / target_eig)
   } else {
     logalpha_init <- 0
@@ -301,20 +266,24 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   sigma_prior_alpha <- 0.05  # P(sigma > 0.5) = 0.05
   lambda_sigma <- -log(sigma_prior_alpha) / sigma_prior_s0
   
-  tmb_data <- list(y_obs = y_obs,
-                   Phi_kle_sp = Phi_kle_sp,
-                   Phi_kle_grid = Phi_kle_grid,
-                   S_diag_truncated = S_diag_truncated,
-                   M_P_null_space = M_P_null_space,
-                   lambda_sigma = lambda_sigma)
-
+  tmb_data <- list(
+    y_obs = y_obs,
+    Phi_kle_sp = Phi_kle_sp,
+    Phi_kle_grid = Phi_kle_grid,
+    S_diag_truncated = S_diag_truncated,
+    M_P_null_space = M_P_null_space,
+    lambda_sigma = lambda_sigma
+  )
+  
   #====================================
   # TMB PARAMETERS
   #====================================
   
-  tmb_par <- list(z_tilde = rep(0, M_truncation),
-                  logsigma = logsigma_init,
-                  logalpha = logalpha_init)
+  tmb_par <- list(
+    z_tilde = rep(0, M_truncation),
+    logsigma = logsigma_init,
+    logalpha = logalpha_init
+  )
   
   #====================================
   # FIT MODEL
@@ -343,14 +312,24 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   # RETURN RESULTS
   #====================================
   
-  res_list = list(obj = obj, opt = opt, rep_tmb = rep_tmb, tmb_data = tmb_data, tmb_par = tmb_par, 
-    M_truncation = M_truncation, variance_explained = var_explained, k_basis = k_basis, n_nodes = n_nodes,
-    u_true_sp = u_true_sp, u_true_grid = u_true_grid, 
-    S_diag_full = S_diag, S_diag_truncated = S_diag_truncated, 
-    lambda_k = lambda_k,  # Store KLE eigenvalues
-    evectors = evectors,  sm = sm,
-    M_mass = M_mass_out,  # Store mass matrix if computed
-    mass_M_used = mass_M, # Store which method was used
+  res_list <- list(
+    obj = obj, 
+    opt = opt, 
+    rep_tmb = rep_tmb, 
+    tmb_data = tmb_data, 
+    tmb_par = tmb_par, 
+    M_truncation = M_truncation, 
+    variance_explained = var_explained, 
+    k_basis = k_basis, 
+    n_nodes = n_nodes,
+    sp_points = sp_points,
+    u_true_sp = u_true_sp, 
+    u_true_grid = u_true_grid, 
+    S_diag_full = S_diag, 
+    S_diag_truncated = S_diag_truncated, 
+    lambda_k = lambda_k,
+    evectors = evectors,  
+    sm = sm,
     Cov_true = Cov_true
   )
   
@@ -429,10 +408,9 @@ for (i in 1:n_scenarios) {
   # COMPARISON STRATEGY FOR regTPS-KLE
   #====================================
   # Maximum k_basis for TPS (must be < N_sp)
-  k_basis_max <- floor(0.99 * N_sp)  # Conservative: 99% of data points
-  k_basis_max <- max(k_basis_max, 10)  # At least 10 basis functions
+  k_basis_max <- floor(0.99 * N_sp)   # 99% of data points
+  k_basis_max <- max(k_basis_max, 10) # At least 10 basis functions
   
-
   if(k_basis_max < n_mesh_nodes) {
     cat("Note: TPS k_basis (", k_basis_max, ") < SPDE nodes (", n_mesh_nodes, ")\n")
     cat("      This is expected - TPS is constrained by data size\n")
@@ -446,7 +424,7 @@ for (i in 1:n_scenarios) {
   obj_tps <- run_tmb_tps(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, 
                          k_basis = k_basis_max, 
                          Cov_true, 
-                         mass_M = FALSE, variance_threshold = 0.99)  # Use RKHS for stability
+                         variance_threshold = 0.99)
   
   #====================================
   # COMPARISON SUMMARY
@@ -477,14 +455,14 @@ for (i in 1:n_scenarios) {
 }
 
 
-
 #====================================
 # Saving all the TMB models
+#====================================
 fits_TMB_spde <- list(fits_TMB_spde[[1]], fits_TMB_spde[[2]], fits_TMB_spde[[3]], fits_TMB_spde[[4]])
-saveRDS(fits_TMB_spde, file='outputs/fits_TMB_spde.RDS')
+saveRDS(fits_TMB_spde, file = 'outputs/fits_TMB_spde.RDS')
 
 fits_TMB_tps <- list(fits_TMB_tps[[1]], fits_TMB_tps[[2]], fits_TMB_tps[[3]], fits_TMB_tps[[4]])
-saveRDS(fits_TMB_tps, file='outputs/fits_TMB_tps.RDS')
+saveRDS(fits_TMB_tps, file = 'outputs/fits_TMB_tps.RDS')
 
 
 
@@ -577,61 +555,3 @@ for (i in 1:length(M)){
 
 
 
-
-
-
-
-# Evaluate if the simulated data are the same
-y_obs_tps   <- fits_TMB_tps[[1]][[4]]$y_obs
-field_tps_sp   <- fits_TMB_tps[[1]][[10]]
-field_tps_grid <- fits_TMB_tps[[1]][[11]]
-
-y_obs_spde  <- fits_TMB_spde[[1]][[4]]$y
-field_spde_sp  <- fits_TMB_spde[[1]][[8]]
-field_spde_grid  <- fits_TMB_spde[[1]][[9]]
-
-cat("TPS vs SPDE  (y_obs):        ", all.equal(y_obs_tps, y_obs_spde), "\n")
-cat("TPS vs SPDE  (field_sp):     ", all.equal(field_tps_sp, field_spde_sp), "\n")
-cat("TPS vs SPDE  (field_grid):   ", all.equal(field_tps_grid, field_spde_grid), "\n")
-
-# Save results
-# saveRDS(fits_TMB_spde, file='outputs/fits_TMB_spde.RDS')
-# saveRDS(fits_TMB_tps, file='outputs/fits_TMB_tps.RDS')
-
-
-
-
-
-
-# Plotting (assuming grid_total coordinates are still dim_grid x dim_grid)
-par(mfrow = c(4, 3))
-image(matrix(fits_TMB_tps[[1]]$u_true_grid, 30, 30), main = "True GRF 1",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[1]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[1]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[1]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[1]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-image(matrix(fits_TMB_tps[[2]]$u_true_grid, 30, 30), main = "True GRF 2",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[2]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[2]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[2]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[2]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-image(matrix(fits_TMB_tps[[3]]$u_true_grid, 30, 30), main = "True GRF 3",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[3]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[3]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[3]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[3]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-image(matrix(fits_TMB_tps[[4]]$u_true_grid, 30, 30), main = "True GRF 4",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[4]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[4]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[4]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[4]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)

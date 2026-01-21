@@ -90,7 +90,6 @@ Type objective_function<Type>::operator() ()
   }
   
   
-  
   //====================================================
   // KLE SCALING (non-centered parameterization)
   //====================================================
@@ -98,10 +97,12 @@ Type objective_function<Type>::operator() ()
   
   for(int k = 0; k < M; k++){
     if(k < M_P_null_space){
-      scale(k) = Type(1.0);  // Null space unpenalized
+      // Null space: unpenalized
+      scale(k) = Type(1.0);
     } else {
-      // RKHS formulation: λ_k = 1/(α v_k)
-      scale(k) = Type(1.0) / sqrt(alpha * S_diag_truncated(k) + Type(1e-10));
+      // Mass matrix formulation: λ_k = 1/(1 + α v_k)
+      // scale_k = sqrt(λ_k) = 1/sqrt(1 + α v_k)
+      scale(k) = Type(1.0) / sqrt(Type(1.0) + alpha * S_diag_truncated(k) + Type(1e-10));
     }
   } 
   

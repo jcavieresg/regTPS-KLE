@@ -110,7 +110,8 @@ Type objective_function<Type>::operator() ()
   
   Type rho_inv = Type(1.0) / rho; // = exp(-log_rho)
   nlp -= dweibull(rho_inv, lambda_rho_inv, Type(1.0), true); // log p(X)
-  nlp += logrho;
+  // nlp += logrho;
+  nlp -= logrho;
   
   nlp -= dexp(sigma_u, lambda_sigma_u, true); // subtract log p(sigma_u)
   nlp -= logsigma_u;                         // subtract log jacobian (log|d sigma_u / d log_sigma_u|)

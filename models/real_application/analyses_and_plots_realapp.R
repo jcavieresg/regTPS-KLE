@@ -21,6 +21,10 @@ regTPS_KLE_tmb <- readRDS('regTPS_KLE_tmb.RDS')
 regTPS_KLE_mcmc <- readRDS('regTPS_KLE_mcmc.RDS')
 
 
+
+# plot(spde_tmb$mesh); points(tmb_spde[[4]]$sp_points, col = "red", pch = 19)
+
+
 #===================================================
 # Extract posterior for SPDE (NON-CENTERED)
 #===================================================
@@ -769,7 +773,7 @@ dens_mean <- dens_df %>%
   summarise(y = mean(y), .groups = "drop")
 
 # --- Plot ---
-plot11 <- ggplot(df_all, aes(x = sim, group = rep)) +
+plot10 <- ggplot(df_all, aes(x = sim, group = rep)) +
   geom_histogram(
     data = data.frame(y_obs = y_obs),
     aes(x = y_obs, y = after_stat(density)),
@@ -787,11 +791,11 @@ plot11 <- ggplot(df_all, aes(x = sim, group = rep)) +
         axis.title.y = element_text(size = 14),
         strip.text = element_text(size = 14),
         axis.text = element_text(size = 14))
-plot11
+plot10
 
 # # Save as high-quality PDF
-ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot11.pdf",
-       plot = plot11,        # Replace with your ggplot object name
+ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot10.pdf",
+       plot = plot10,        # Replace with your ggplot object name
        device = cairo_pdf,    # Good for embedding text as text
        width = 10,             # Width in inches
        height = 6,            # Height in inches
