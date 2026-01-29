@@ -391,6 +391,12 @@ for (i in 1:n_scenarios) {
                          k_basis = k_basis_max, 
                          Cov_true, 
                          variance_threshold = 0.99)
+
+  if(obj_tps$M_truncation < n_mesh_nodes) {
+    reduction_pct <- round((1 - obj_tps$M_truncation / n_mesh_nodes) * 100, 1)
+    cat("  TPS achieves", reduction_pct, "% reduction in basis functions\n")
+    cat("  while maintaining", round(obj_tps$variance_explained * 100, 1), "% variance\n")
+  }
   
   fits_TMB_spde[[i]] <- obj_spde
   fits_TMB_tps[[i]] <- obj_tps
