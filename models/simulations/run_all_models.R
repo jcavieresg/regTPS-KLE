@@ -20,8 +20,8 @@ dyn.load(dynlib("spde"))
 
 #==================================
 # Compile the model and load it
-compile("tps_kle.cpp", clean = TRUE)
-dyn.load(dynlib("tps_kle"))
+compile("regTPS_KLE.cpp", clean = TRUE)
+dyn.load(dynlib("regTPS_KLE"))
 
 
 #=====================================================================================
@@ -131,10 +131,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # STANDARD EIGENDECOMPOSITION
   #====================================
-  
-  cat("  Using standard eigenvalue problem (S ψ = v ψ)\n")
-  
-  # Standard eigendecomposition: S ψ = v ψ
+  # Standard eigendecomposition
   S_eig <- eigen(S, symmetric = TRUE)
   S_diag <- S_eig$values
   evectors <- S_eig$vectors
@@ -142,8 +139,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # CLEAN AND ORDER EIGENVALUES
   #====================================
-  
-  # Clean small eigenvalues
+    # Clean small eigenvalues
   S_diag[abs(S_diag) < 1e-12] <- 0
   
   # Check for negative eigenvalues (numerical error)
@@ -162,16 +158,9 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   
   M_P_null_space <- sm$null.space.dim
   
-  cat("  Null space dimension:", M_P_null_space, "\n")
-  cat("  Total basis functions:", length(S_diag), "\n")
-  cat("  Non-zero eigenvalues:", sum(S_diag > 1e-10), "\n")
-  
   #====================================
   # VARIANCE-BASED TRUNCATION
   #====================================
-  
-  cat("  Computing variance-based truncation...\n")
-  
   # Estimate alpha from data
   signal_var_est <- max(var(y_obs) - sigma0_error^2, 0.1)
   nonzero_eigs <- S_diag[S_diag > 1e-10]
@@ -183,8 +172,6 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
     alpha_est <- signal_var_est / median(nonzero_eigs)
     alpha_est <- max(min(alpha_est, exp(5)), exp(-5))
   }
-  
-  cat("  Estimated alpha for truncation:", round(alpha_est, 4), "\n")
   
   # Compute KLE eigenvalues: lambda_k = 1/(1 + alpha * v_k)
   lambda_k <- 1 / (1 + alpha_est * S_diag)
@@ -218,13 +205,9 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   # Compute actual variance explained
   var_explained <- sum(lambda_k[1:M_truncation]) / total_variance
   
-  cat("  Final M_truncation:", M_truncation, "\n")
-  cat("  Variance explained:", round(var_explained * 100, 2), "%\n")
-  
   #====================================
   # CREATE TRUNCATED MATRICES
   #====================================
-  
   Phi_kle_sp <- Phi_basis_sp %*% evectors[, 1:M_truncation]
   Phi_kle_grid <- Phi_basis_grid %*% evectors[, 1:M_truncation]
   S_diag_truncated <- S_diag[1:M_truncation]
@@ -232,13 +215,9 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # INITIALIZATION
   #====================================
-  
-  # 1. Sigma initialization
   logsigma_init <- log(sigma0_error)
-  
-  # 2. Alpha initialization
   signal_var <- max(var(y_obs) - sigma0_error^2, 0.1)
-  
+ 
   # Use eigenvalues from non-null, non-zero components
   valid_idx <- (M_P_null_space + 1):M_truncation
   valid_eigs <- S_diag_truncated[valid_idx]
@@ -256,9 +235,6 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   # Bound initial values
   logalpha_init <- pmax(pmin(logalpha_init, 3), -3)
   
-  cat("  Initial sigma:", round(exp(logsigma_init), 4), "\n")
-  cat("  Initial alpha:", round(exp(logalpha_init), 4), "\n")
-  
   #====================================
   # TMB DATA
   #====================================
@@ -272,8 +248,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
     Phi_kle_grid = Phi_kle_grid,
     S_diag_truncated = S_diag_truncated,
     M_P_null_space = M_P_null_space,
-    lambda_sigma = lambda_sigma
-  )
+    lambda_sigma = lambda_sigma)
   
   #====================================
   # TMB PARAMETERS
@@ -282,16 +257,14 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   tmb_par <- list(
     z_tilde = rep(0, M_truncation),
     logsigma = logsigma_init,
-    logalpha = logalpha_init
-  )
+    logalpha = logalpha_init)
   
   #====================================
-  # FIT MODEL
+  # FIT MODEL in TMB
   #====================================
-  cat("  Fitting TMB model...\n")
-  
+
   obj <- MakeADFun(data = tmb_data, parameters = tmb_par, 
-                   DLL = "tps_kle", random = "z_tilde")
+                   DLL = "regTPS_KLE", random = "z_tilde")
   
   opt <- nlminb(obj$par, obj$fn, obj$gr,
                 control = list(eval.max = 1000, iter.max = 500))
@@ -330,8 +303,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
     lambda_k = lambda_k,
     evectors = evectors,  
     sm = sm,
-    Cov_true = Cov_true
-  )
+    Cov_true = Cov_true)
   
   return(res_list)
 }
@@ -394,15 +366,10 @@ for (i in 1:n_scenarios) {
   y_obs <- u_true_sp + rnorm(N_sp, 0, sigma0_error)
   
   # Run SPDE model first
-  cat("\n--- Running SPDE model ---\n")
   obj_spde <- run_tmb_spde(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, Cov_true)
   
   # Get number of mesh nodes from SPDE
   n_mesh_nodes <- mesh$n
-  
-  cat("\n=== Comparison Setup ===\n")
-  cat("N observations:", N_sp, "\n")
-  cat("SPDE mesh nodes:", n_mesh_nodes, "\n")
   
   #====================================
   # COMPARISON STRATEGY FOR regTPS-KLE
@@ -420,35 +387,10 @@ for (i in 1:n_scenarios) {
   }
   
   # Run TPS model
-  cat("\n--- Running TPS model ---\n")
   obj_tps <- run_tmb_tps(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, 
                          k_basis = k_basis_max, 
                          Cov_true, 
                          variance_threshold = 0.99)
-  
-  #====================================
-  # COMPARISON SUMMARY
-  #====================================
-  
-  cat("\n=== Final Comparison ===\n")
-  cat("SPDE:\n")
-  cat("  Basis functions used:", n_mesh_nodes, "\n")
-  cat("  (all mesh nodes)\n")
-  
-  cat("\nTPS:\n")
-  cat("  Available k_basis:", k_basis_max, "\n")
-  cat("  Selected M_truncation:", obj_tps$M_truncation, "\n")
-  cat("  Variance explained:", round(obj_tps$variance_explained * 100, 2), "%\n")
-  
-  cat("\nEfficiency:\n")
-  cat("  TPS uses", obj_tps$M_truncation, "basis functions vs SPDE's", n_mesh_nodes, "\n")
-  cat("  Ratio (TPS/SPDE):", round(obj_tps$M_truncation / n_mesh_nodes, 3), "\n")
-  
-  if(obj_tps$M_truncation < n_mesh_nodes) {
-    reduction_pct <- round((1 - obj_tps$M_truncation / n_mesh_nodes) * 100, 1)
-    cat("  TPS achieves", reduction_pct, "% reduction in basis functions\n")
-    cat("  while maintaining", round(obj_tps$variance_explained * 100, 1), "% variance\n")
-  }
   
   fits_TMB_spde[[i]] <- obj_spde
   fits_TMB_tps[[i]] <- obj_tps
