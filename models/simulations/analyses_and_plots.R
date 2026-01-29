@@ -78,10 +78,8 @@ extract_spde_field_from_stan <- function(
   n_iter <- nrow(u_draws)
   n_grid <- nrow(A_grid)
   
-  # ---- Storage ----
   field_mean <- numeric(n_grid)
   
-  # ---- Loop over iterations (memory safe) ----
   for (iter in seq_len(n_iter)) {
     
     # Transform hyperparameters
@@ -133,10 +131,8 @@ extract_tps_field_from_stan <- function(
   M      <- ncol(z_tilde_draws)
   n_grid <- nrow(Phi_kle_grid)
   
-  # ---- Storage ----
   field_mean <- numeric(n_grid)
   
-  # ---- Loop over iterations (memory safe) ----
   for (iter in seq_len(n_iter)) {
     
     alpha_iter <- alpha_draws[iter]
@@ -233,19 +229,16 @@ mcmc_tps_list <- list("Sce.1" = mcmc_tps1,
 # Extract logalpha and then exponentiate to get alpha.
 # We'll use lapply to iterate over the list of objects.
 alpha_posteriors <- lapply(mcmc_tps_list, function(x) {
-  # This correctly extracts the logalpha samples from each stanfit object.
   exp(rstan::extract(x)$logalpha)
 })
 
 # Combine all posterior samples into a single data frame for ggplot.
-# The `bind_rows` function will create a column named '.' when it combines unnamed vectors.
-# We can rename that column directly inside the `bind_rows` call.
 plot_df <- bind_rows(lapply(alpha_posteriors, function(x) {
   data.frame(alpha = x)
 }), .id = "Scenarios")
 
 #==================================================
-#               Correct plot
+#               Plot
 #==================================================
 # Prior on alpha
 # Log-Cauchy density function
@@ -329,7 +322,7 @@ ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot1.pdf",
 
 
 #===================================================
-# CORRECTED: Extract Posterior Means for Z Coefficients
+# Extract Posterior Means for z Coefficients
 # (Non-centered parameterization)
 #===================================================
 
@@ -438,7 +431,7 @@ plot_data <- bind_rows(
 )
 
 #===================================================
-# Enhanced Diagnostic Plot
+# Diagnostic Plot
 #===================================================
 
 library(ggplot2)
@@ -489,7 +482,7 @@ print(plot2)
 
 
 #===================================================
-# Enhanced Diagnostic Plot - LOG-LOG SCALE
+# Diagnostic Plot - LOG-LOG SCALE
 #===================================================
 
 library(ggplot2)
@@ -551,40 +544,6 @@ ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot2_b.pdf",
 
 
 
-
-
-#===================================================
-# Summary Statistics
-#===================================================
-
-summary_stats <- plot_data %>%
-  group_by(Scenario, ModeType) %>%
-  summarise(
-    N_modes = n(),
-    Mean_PriorSD = mean(PriorSD),
-    Mean_Postz = mean(z_post_abs),
-    Ratio = mean(z_post_abs / PriorSD),
-    N_exceed_2SD = sum(z_post_abs > 2 * PriorSD),
-    .groups = "drop"
-  )
-
-print(summary_stats)
-
-#===================================================
-# Diagnostic: Check for modes exceeding 2SD
-#===================================================
-
-outliers <- plot_data %>%
-  filter(z_post_abs > 2 * PriorSD) %>%
-  arrange(Scenario, desc(z_post_abs / PriorSD))
-
-if(nrow(outliers) > 0) {
-  cat("\nWarning: Some modes exceed 2SD bound:\n")
-  print(outliers)
-} else {
-  cat("\nAll modes within 2SD bound - good prior calibration!\n")
-}
-
 # Save as high-quality PDF
 ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot2.pdf",
        plot = plot2,        # Replace with your ggplot object name
@@ -598,7 +557,7 @@ ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot2.pdf",
 
 
 #===============================================
-# PLOT3
+# PLOT 3
 #===============================================
 
 library(dplyr)
@@ -616,13 +575,13 @@ compute_kle_eigenvalues <- function(scenario_idx, tmb_tps, z_results) {
   # Get posterior mean of alpha
   alpha_mean <- z_results[[scenario_idx]]$alpha_mean
   
-  # Compute KLE eigenvalues: λ_k = 1/(1 + α·v_k)
+  # Compute KLE eigenvalues: 
   lambda_k <- 1 / (1 + alpha_mean * v_k + 1e-10)
   
   # Null space handling
   M_P_null <- tmb_tps[[scenario_idx]][[4]]$M_P_null_space
   if (M_P_null > 0) {
-    lambda_k[1:M_P_null] <- 1  # Null space has λ = 1
+    lambda_k[1:M_P_null] <- 1  # Null space 
   }
   
   M_truncation <- tmb_tps[[scenario_idx]][[6]]
@@ -649,8 +608,8 @@ combined_data <- bind_rows(
   lapply(1:4, function(i) {
     data.frame(
       k = 1:length(eigenvalue_data[[i]]$lambda_k),
-      penalty_eigenvalue = eigenvalue_data[[i]]$v_k,  # v_k from penalty matrix
-      kle_eigenvalue = eigenvalue_data[[i]]$lambda_k,  # λ_k for KLE
+      penalty_eigenvalue = eigenvalue_data[[i]]$v_k,  # from penalty matrix
+      kle_eigenvalue = eigenvalue_data[[i]]$lambda_k,  
       alpha = eigenvalue_data[[i]]$alpha,
       M_null = eigenvalue_data[[i]]$M_P_null,
       mode_type = ifelse(1:length(eigenvalue_data[[i]]$lambda_k) <= 
@@ -662,7 +621,7 @@ combined_data <- bind_rows(
 )
 
 #===================================================
-# Plot 1: KLE Eigenvalue Decay (λ_k)
+# Plot 1: KLE Eigenvalue Decay 
 #===================================================
 
 plot3_a <- ggplot(combined_data, aes(x = k, y = kle_eigenvalue)) +
@@ -679,7 +638,6 @@ plot3_a <- ggplot(combined_data, aes(x = k, y = kle_eigenvalue)) +
                                 "Penalized" = "#377EB8")) +
   labs(
     title = "KLE Eigenvalue Decay",
-    # subtitle = expression("λ"[k] * " = 1/(1 + α·v"[k] * ") - rapid decay enables low-rank approximation"),
     x = "Eigenvalue Index (k)",
     y = expression("KLE Eigenvalue (λ"[k]*")"),
     color = "Mode Type"
@@ -746,7 +704,7 @@ plot3_b <- ggplot(combined_data_cum, aes(x = k, y = cumulative_variance)) +
 plot3_b
 
 #===================================================
-# Plot 3: Penalty Eigenvalue Spectrum (v_k)
+# Plot 3: Penalty Eigenvalue Spectrum 
 #===================================================
 plot3_c <- ggplot(combined_data, aes(x = k, y = penalty_eigenvalue)) +
   geom_point(aes(color = mode_type), size = 3, alpha = 1.2, shape = 1) +
@@ -775,15 +733,6 @@ plot3_c <- ggplot(combined_data, aes(x = k, y = penalty_eigenvalue)) +
 plot3_c
 
 
-#===================================================
-# Combine all plots
-#===================================================
-
-# plot3 <- grid.arrange(plot3_a, plot3_b, plot3_c, ncol = 1)
-
-
-
-
 # Save as high-quality PDF
 ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot3_b.pdf",
        plot = plot3_b,        # Replace with your ggplot object name
@@ -807,28 +756,7 @@ ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot3_c.pdf",
 
 
 #===================================================
-# Summary Statistics Table
-#===================================================
-
-summary_table <- combined_data_cum %>%
-  group_by(scenario) %>%
-  summarise(
-    M_total = n(),
-    M_null = first(M_null),
-    M_95pct = min(k[cumulative_variance >= 0.95]),
-    M_99pct = min(k[cumulative_variance >= 0.99]),
-    alpha_mean = first(alpha),
-    max_lambda = max(kle_eigenvalue),
-    min_lambda = min(kle_eigenvalue[mode_type == "Penalized"]),
-    lambda_ratio = max_lambda / min_lambda,
-    .groups = "drop"
-  )
-
-
-
-
-#===================================================
-# Diagnostic: Check eigenvalue decay rate
+# Check eigenvalue decay rate
 #===================================================
 decay_analysis <- combined_data %>%
   filter(mode_type == "Penalized") %>%
@@ -846,14 +774,6 @@ decay_analysis <- combined_data %>%
 
 print(decay_analysis)
 
-# Save as high-quality PDF
-# ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot3.pdf",
-#        plot = plot3,        # Replace with your ggplot object name
-#        device = cairo_pdf,    # Good for embedding text as text
-#        width = 10,             # Width in inches
-#        height = 8,            # Height in inches
-#        dpi = 300              # Only affects raster elements, safe to keep high
-# )
 
 
 
@@ -877,7 +797,6 @@ extract_spectral_results <- function(scenario_obj, scenario_name = "Scenario") {
   M_P_null_space <- tmb_data$M_P_null_space
   
   # Compute spectral quantities (Hankel transform perspective for d=2)
-  # For biharmonic operator: μ_k ≈ ω_k^4
   omega_k <- (pmax(S_diag, 1e-10))^(1/4)
   wavelength_k <- 2*pi / omega_k
   
@@ -1154,7 +1073,7 @@ ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot5.pdf",
 
 
 #=========================================
-# CORRECTED: Field Comparison Plot
+# Field Comparison Plot
 #=========================================
 
 library(reshape2)
@@ -1163,7 +1082,7 @@ library(dplyr)
 library(tidyr)
 
 #===================================================
-# FINAL CORRECTED reshape function
+# Reshape function
 #===================================================
 
 reshape_data <- function(true_data,  
@@ -1357,19 +1276,6 @@ plot6 <- ggplot(all_data, aes(x = Var1, y = Var2, fill = value_norm)) +
 print(plot6)
 
 
-# plot6_zoom <- plot6 +
-#   coord_fixed(
-#     ratio = 1,
-#     xlim = c(10, 20),
-#     ylim = c(10, 20)
-#   )
-# 
-# print(plot6_zoom)
-
-
-
-
-
 
 # Save as high-quality PDF
 ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot6.pdf",
@@ -1452,29 +1358,6 @@ ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/plots/plot6_diff.pdf",
 
 
 
-#===================================================
-# Summary statistics
-#===================================================
-
-error_summary <- diff_data %>%
-  group_by(scenario, method) %>%
-  summarise(
-    RMSE = sqrt(mean(error^2)),
-    MAE = mean(abs(error)),
-    Bias = mean(error),
-    Max_abs_error = max(abs(error)),
-    .groups = "drop"
-  )
-
-
-error_summary
-
-
-
-
-
-
-
 #===============================
 #            Plot 7
 #===============================
@@ -1485,7 +1368,7 @@ dyn.load(dynlib("C:/Users/jcavi/OneDrive/Escritorio/KLE/spde"))
 
 #==================================
 # Compile the model and load it
-dyn.load(dynlib("C:/Users/jcavi/OneDrive/Escritorio/KLE/tps_kle"))
+dyn.load(dynlib("C:/Users/jcavi/OneDrive/Escritorio/KLE/regTPS_KLE"))
 
 
 
@@ -2346,887 +2229,3 @@ ggplot(metrics_long, aes(x = Scenario, y = Value, fill = Method)) +
 
 
 
-
-# Combine all metrics
-
-#=====================================================================================
-# 1. Access Results from the TMB run
-#=====================================================================================
-
-# 'res_list' is the output from your run_tmb function.
-# The following lines extract the necessary components.
-# obj_tmb <- tmb_tps[[1]][[1]] # The TMB object
-# opt_tmb <- tmb_tps[[1]][[2]] # The optimization result
-# rep_tmb <- tmb_tps[[1]][[3]] # The sdreport object
-# tmb_data <- tmb_tps[[1]][[4]] # The data list
-# tmb_par <- tmb_tps[[1]][[5]] # The parameter list
-# M_truncation <- tmb_tps[[1]][[6]] # The M_truncation value
-# n_nodes <- tmb_tps[[1]][[7]] # The number of nodes
-# true_field_grid <- tmb_tps[[1]][[8]] # The true GRF on the grid
-# 
-# # Extracting reported values
-# reconstructed_field <- obj_tmb$report()$field_grid
-# field_sp <- obj_tmb$report()$field_sp
-# sigma_est <- exp(rep_tmb$par.fixed["logsigma"])
-# alpha_est <- exp(rep_tmb$par.fixed["logalpha"])
-# 
-# # Extracting data and parameters for plots
-# y_obs <- tmb_data$y
-# S_diag_truncated <- tmb_data$S_diag_truncated
-# M_P_null_space <- tmb_data$M_P_null_space
-# 
-# # Estimated KLE coefficients
-# Z_estimated <- as.vector(rep_tmb$par.random[names(rep_tmb$par.random) == "Z"])
-# 
-# 
-# #=====================================================================================
-# # 2. Plots to Evaluate GRF Approximation
-# #=====================================================================================
-# par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
-# 
-# # a) Scatter plot: Reconstructed Field vs. True Field
-# true_field_grid_spde <- tmb_spde[[1]][[8]]
-# plot(true_field_grid_spde, spde_field_grid1, # The true GRF on the grid
-#      xlab = "True Field Value",
-#      ylab = "SPDE Field Value",
-#      main = "Reconstructed SPDE vs. True Field",
-#      pch = 19, col = alpha("black", 0.5))
-# abline(a = 0, b = 1, col = "red", lty = 2, lwd = 2) # Identity line
-# cor_val <- cor(true_field_grid_spde, spde_field_grid1)
-# mtext(paste("Correlation:", round(cor_val, 3)), side = 3, line = -1.5, adj = 0.05)
-# 
-# 
-# true_field_grid_tps <- tmb_tps[[1]][[8]]
-# plot(true_field_grid_tps, tps_field_grid1,
-#      xlab = "True Field Value",
-#      ylab = "TPS Field Value",
-#      main = "Reconstructed TPS vs. True Field",
-#      pch = 19, col = alpha("black", 0.5))
-# abline(a = 0, b = 1, col = "red", lty = 2, lwd = 2) # Identity line
-# cor_val <- cor(true_field_grid_tps, tps_field_grid1)
-# mtext(paste("Correlation:", round(cor_val, 3)), side = 3, line = -1.5, adj = 0.05)
-# 
-# 
-# # b) Residual Diagnostics
-# residuals_spde <- tmb_spde[[1]][[4]]$y - tmb_spde[[1]][[1]]$report()$field_sp
-# qqnorm(residuals_spde,
-#        main = "Q-Q Plot of Residuals SPDE",
-#        xlab = "Theoretical Quantiles",
-#        ylab = "Sample Quantiles")
-# qqline(residuals_spde, col = "red", lty = 2, lwd = 2)
-# 
-# 
-# residuals_tps <- tmb_tps[[1]][[4]]$y - tmb_tps[[1]][[1]]$report()$field_sp
-# qqnorm(residuals_tps,
-#        main = "Q-Q Plot of Residuals TPS",
-#        xlab = "Theoretical Quantiles",
-#        ylab = "Sample Quantiles")
-# qqline(residuals_tps, col = "red", lty = 2, lwd = 2)
-# 
-# 
-# # tmb_tps_sp <- tmb_tps[[1]][[1]]$report()$field_sp
-# # stan_tps_sp <- as.vector(tmb_tps[[1]][[4]]$Phi_kle_sp %*% Z_post1)
-# # plot(tmb_tps_sp, stan_tps_sp)
-# 
-# 
-# #=====================================================================================
-# # 1. Access Results from the tmbstan models
-# #=====================================================================================
-# library(RColorBrewer) # For a nice color palette
-# # Extract data for the TPS model
-# tps_true_field <- tmb_tps[[1]][[8]]
-# tps_reconstructed_field <- tps_field_grid1
-# tps_y_obs <- tmb_tps[[1]][[4]]$y
-# tps_field_sp <- tmb_tps[[1]][[1]]$report()$field_sp
-# tps_residuals <- tps_y_obs - tps_field_sp
-# 
-# # Extract data for the SPDE model
-# spde_true_field <- tmb_spde[[1]][[8]]
-# spde_reconstructed_field <- spde_field_grid1
-# spde_y_obs <- tmb_spde[[1]][[4]]$y
-# spde_field_sp <- tmb_spde[[1]][[1]]$report()$field_sp
-# spde_residuals <- spde_y_obs - spde_field_sp
-# 
-# 
-# # Data for the scatter plots
-# scatter_data <- data.frame(
-#   True_Field = c(tps_true_field, spde_true_field),
-#   Reconstructed_Field = c(tps_reconstructed_field, as.numeric(spde_reconstructed_field)),
-#   Method = factor(rep(c("TPS", "SPDE"), each = length(tps_true_field)))
-# )
-# 
-# # Data for the residual plots
-# # Create a data frame with quantiles for the Q-Q plot
-# qq_data <- data.frame(
-#   Residuals = c(tps_residuals, spde_residuals),
-#   Method = factor(rep(c("TPS", "SPDE"), each = length(tps_residuals)))
-# )
-# qq_df <- qq_data %>%
-#   group_by(Method) %>%
-#   do(data.frame(
-#     theoretical = qnorm(ppoints(.$Residuals)),
-#     sample = sort(.$Residuals)
-#   ))
-# 
-# 
-# #=====================================================================================
-# # 3. Create ggplot visualizations using facet_wrap
-# #=====================================================================================
-# library(cowplot)
-# # Plot 1: Reconstructed vs. True Field with facet_wrap
-# p1 <- ggplot(scatter_data, aes(x = True_Field, y = Reconstructed_Field)) +
-#   geom_point(alpha = 0.5) +
-#   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red", size = 1) +
-#   labs(
-#     title = "Approximated Field vs. True Field",
-#     x = "True Field Values",
-#     y = "Approxmated Field Values"
-#   ) +
-#   facet_wrap(~ Method) +
-#   theme_bw(base_size = 14) +
-#   theme(
-#     strip.text = element_text(size = 16),   # facet label text size
-#     axis.text = element_text(size = 12)     # tick label size
-#   )
-# 
-#   
-# 
-# 
-# # Plot 2: Q-Q plot of Residuals with facet_wrap using stat_qq and stat_qq_line
-# p2 <- ggplot(qq_data, aes(sample = Residuals)) +
-#   stat_qq(alpha = 0.5) +
-#   stat_qq_line(color = "red", linetype = "dashed", size = 1) +
-#   labs(
-#     title = "Q-Q Plot of Residuals",
-#     x = "Theoretical Quantiles",
-#     y = "Sample Quantiles"
-#   ) +
-#   facet_wrap(~ Method) +
-#   theme_bw(base_size = 14) +
-#   theme(
-#     strip.text = element_text(size = 16, ),   # facet label text size
-#     axis.text = element_text(size = 12)     # tick label size
-#   )
-# 
-# 
-# 
-# 
-# #=====================================================================================
-# # 4. Combine the plots into a single figure using cowplot
-# #=====================================================================================
-# # Use cowplot to arrange the two ggplots side-by-side
-# combined_plot <- plot_grid(p1, p2, 
-#                            ncol = 1) 
-# 
-# # Print the final plot
-# print(combined_plot)
-
-
-#=====================================================================================
-# Access Results from the tmbstan models
-#=====================================================================================
-# library(RColorBrewer) # For a nice color palette
-# # Extract data for the TPS model
-# Z_post1 <- colMeans(rstan::extract(mcmc_tps1)$Z)  # Posterior samples of KL coefficients
-# Z_post2 <- colMeans(rstan::extract(mcmc_tps2)$Z)  # Posterior samples of KL coefficients
-# Z_post3 <- colMeans(rstan::extract(mcmc_tps3)$Z)  # Posterior samples of KL coefficients
-# Z_post4 <- colMeans(rstan::extract(mcmc_tps4)$Z)  # Posterior samples of KL coefficients
-# 
-# tps_true_grid1 <- tmb_tps[[1]][[8]]
-# tps_app_grid1 <- tmb_tps[[1]][[4]]$Phi_kle_grid %*% Z_post1
-# tps_y_obs1 <- tmb_tps[[1]][[4]]$y
-# tps_app_sp1 <- tmb_tps[[1]][[4]]$Phi_kle_sp %*% Z_post1
-# tps_residuals1 <- tps_y_obs1 - tps_app_sp1
-# 
-# 
-# tps_true_grid2 <- tmb_tps[[2]][[8]]
-# tps_app_grid2 <- tmb_tps[[2]][[4]]$Phi_kle_grid %*% Z_post2
-# tps_y_obs2 <- tmb_tps[[2]][[4]]$y
-# tps_app_sp2 <- tmb_tps[[2]][[4]]$Phi_kle_sp %*% Z_post2
-# tps_residuals2 <- tps_y_obs2 - tps_app_sp2
-# 
-# 
-# tps_true_grid3 <- tmb_tps[[3]][[8]]
-# tps_app_grid3 <- tmb_tps[[3]][[4]]$Phi_kle_grid %*% Z_post3
-# tps_y_obs3 <- tmb_tps[[3]][[4]]$y
-# tps_app_sp3 <- tmb_tps[[3]][[4]]$Phi_kle_sp %*% Z_post3
-# tps_residuals3 <- tps_y_obs3 - tps_app_sp3
-# 
-# 
-# tps_true_grid4 <- tmb_tps[[4]][[8]]
-# tps_app_grid4 <- tmb_tps[[4]][[4]]$Phi_kle_grid %*% Z_post4
-# tps_y_obs4 <- tmb_tps[[4]][[4]]$y
-# tps_app_sp4 <- tmb_tps[[4]][[4]]$Phi_kle_sp %*% Z_post4
-# tps_residuals4 <- tps_y_obs4 - tps_app_sp4
-# 
-# # Extract data for the SPDE model
-# u_post1 <- colMeans(rstan::extract(mcmc_spde1)$u)  # Posterior samples of KL coefficients
-# u_post2 <- colMeans(rstan::extract(mcmc_spde2)$u)  # Posterior samples of KL coefficients
-# u_post3 <- colMeans(rstan::extract(mcmc_spde3)$u)  # Posterior samples of KL coefficients
-# u_post4 <- colMeans(rstan::extract(mcmc_spde4)$u)  # Posterior samples of KL coefficients
-# 
-# spde_true_grid1 <- tmb_spde[[1]][[8]]
-# spde_app_grid1 <- tmb_spde[[1]][[4]]$A_grid %*% u_post1
-# spde_y_obs1 <- tmb_spde[[1]][[4]]$y
-# spde_app_sp1 <- tmb_spde[[1]][[4]]$A_obs %*% u_post1
-# spde_residuals1 <- spde_y_obs1 - spde_app_sp1
-# 
-# spde_true_grid2 <- tmb_spde[[2]][[8]]
-# spde_app_grid2 <- tmb_spde[[2]][[4]]$A_grid %*% u_post2
-# spde_y_obs2 <- tmb_spde[[2]][[4]]$y
-# spde_app_sp2 <- tmb_spde[[2]][[4]]$A_obs %*% u_post2
-# spde_residuals2 <- spde_y_obs2 - spde_app_sp2
-# 
-# spde_true_grid3 <- tmb_spde[[3]][[8]]
-# spde_app_grid3 <- tmb_spde[[3]][[4]]$A_grid %*% u_post3
-# spde_y_obs3 <- tmb_spde[[3]][[4]]$y
-# spde_app_sp3 <- tmb_spde[[3]][[4]]$A_obs %*% u_post3
-# spde_residuals3 <- spde_y_obs3 - spde_app_sp3
-# 
-# spde_true_grid4 <- tmb_spde[[4]][[8]]
-# spde_app_grid4 <- tmb_spde[[4]][[4]]$A_grid %*% u_post4
-# spde_y_obs4 <- tmb_spde[[4]][[4]]$y
-# spde_app_sp4 <- tmb_spde[[4]][[4]]$A_obs %*% u_post4
-# spde_residuals4 <- spde_y_obs4 - spde_app_sp4
-# 
-# 
-# 
-# make_plots <- function(tps_true_grid, spde_true_grid,
-#                        tps_app_grid, spde_app_grid,
-#                        tps_residuals, spde_residuals,
-#                        scenario_label) {
-#   
-#   # Scatter data
-#   scatter_data <- data.frame(
-#     True_Field = c(tps_true_grid, spde_true_grid),
-#     App_Field  = c(as.vector(tps_app_grid), as.vector(spde_app_grid)),
-#     Method     = factor(rep(c("regTPS-KLE", "SPDE"), each = length(tps_app_grid)),
-#                         levels = c("SPDE", "regTPS-KLE"))
-#   )
-#   
-#   # Residuals data
-#   qq_data <- data.frame(
-#     Residuals = c(as.vector(tps_residuals), as.vector(spde_residuals)),
-#     Method    = factor(rep(c("regTPS-KLE", "SPDE"), each = length(tps_residuals)),
-#                        levels = c("SPDE", "regTPS-KLE"))
-#   )
-#   
-#   # Scatter plot
-#   p1 <- ggplot(scatter_data, aes(x = True_Field, y = App_Field)) +
-#     geom_point(alpha = 0.5, shape = 1, colour = "grey") +
-#     geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red", size = 1) +
-#     labs(title = paste("Approximated vs True Field –", scenario_label),
-#          x = "True Field Values",
-#          y = "Approx. Field Values") +
-#     facet_wrap(~ Method) +
-#     theme_bw(base_size = 12) +
-#     theme(plot.title = element_text(face = "bold"),
-#           strip.text = element_text(size = 16),
-#           axis.text  = element_text(size = 12)) 
-#   
-#   # QQ plot
-#   p2 <- ggplot(qq_data, aes(sample = Residuals)) +
-#     stat_qq(alpha = 0.3, shape = 1, colour = "black") +
-#     stat_qq_line(color = "red", linetype = "dashed", size = 1) +
-#     labs(title = paste("Q-Q Plot of Residuals –", scenario_label),
-#          x = "Theoretical Quantiles",
-#          y = "Sample Quantiles") +
-#     facet_wrap(~ Method) +
-#     theme_bw(base_size = 12) +
-#     theme(plot.title = element_text(face = "bold"),
-#           strip.text = element_text(size = 16),
-#           axis.text  = element_text(size = 12))
-#   
-#   # Combine vertically
-#   plot_grid(p1, p2, nrow = 1)
-# }
-# 
-# # Now generate plots for all 4 scenarios
-# library(cowplot)
-# plot_scen1 <- make_plots(tps_true_grid1, spde_true_grid1,
-#                          tps_app_grid1, spde_app_grid1,
-#                          tps_residuals1, spde_residuals1,
-#                          "Sce. 1")
-# 
-# plot_scen2 <- make_plots(tps_true_grid2, spde_true_grid2,
-#                          tps_app_grid2, spde_app_grid2,
-#                          tps_residuals2, spde_residuals2,
-#                          "Sce. 2")
-# 
-# plot_scen3 <- make_plots(tps_true_grid3, spde_true_grid3,
-#                          tps_app_grid3, spde_app_grid3,
-#                          tps_residuals3, spde_residuals3,
-#                          "Sce. 3")
-# 
-# plot_scen4 <- make_plots(tps_true_grid4, spde_true_grid4,
-#                          tps_app_grid4, spde_app_grid4,
-#                          tps_residuals4, spde_residuals4,
-#                          "Sce. 4")
-# 
-# # Arrange all scenarios together (2x2 grid of combined plots)
-# plot5 <- plot_grid(plot_scen1, plot_scen2,
-#                       plot_scen3, plot_scen4,
-#                       labels = c("A)", "B)", "C)", "D)"),
-#                       nrow = 4)
-# plot5
-# 
-# # Save as high-quality PDF
-# ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot5.pdf",
-#        plot = plot5,        # Replace with your ggplot object name
-#        device = cairo_pdf,    # Good for embedding text as text
-#        width = 12,             # Width in inches
-#        height = 10,            # Height in inches
-#        dpi = 300              # Only affects raster elements, safe to keep high
-# )
-
-
-
-
-
-# S3 method for stanfit
-# print(mcmc_tps1, 
-#       probs = c(0.025, 0.25, 0.5, 0.75, 0.975),
-#       digits_summary = 2)
-# 
-# sum_tps1 <- summary(mcmc_tps1, probs = c(0.2, 0.5, 0.8))
-# exp(sum_tps1$summary["logalpha", c(1, 3, 4, 5, 6)])
-# 
-# sum_tps2 <- summary(mcmc_tps2, probs = c(0.2, 0.5, 0.8))
-# exp(sum_tps2$summary["logalpha", c(1, 3, 4, 5, 6)])
-# 
-# sum_tps3 <- summary(mcmc_tps3, probs = c(0.2, 0.5, 0.8))
-# exp(sum_tps3$summary["logalpha", c(1, 3, 4, 5, 6)])
-# 
-# sum_tps4 <- summary(mcmc_tps4, probs = c(0.2, 0.5, 0.8))
-# exp(sum_tps4$summary["logalpha", c(1, 3, 4, 5, 6)])
-# 
-# 
-# # Collect results into a dataframe
-# summaries <- list(TPS1 = sum_tps1, TPS2 = sum_tps2,
-#                   TPS3 = sum_tps3, TPS4 = sum_tps4)
-# 
-# df <- lapply(names(summaries), function(name) {
-#   s <- summaries[[name]]$summary["logalpha", c("mean", "20%", "80%")]
-#   data.frame(
-#     Method = name,
-#     Mean   = exp(s["mean"]),
-#     Q20    = exp(s["20%"]),
-#     # Median = exp(s["50%"]),
-#     Q80    = exp(s["80%"])
-#   )
-# }) %>% bind_rows()
-# 
-# 
-# # Plot with quantile ranges
-# ggplot(df, aes(x = Method, y = Mean)) +
-#   geom_point(size = 3, color = "steelblue") +
-#   geom_errorbar(aes(ymin = Q20, ymax = Q80), width = 0.2, color = "steelblue") +
-#   geom_point(aes(y = Mean), shape = 4, size = 3, color = "darkred") +
-#   facet_wrap(~Method, scales = "free") +
-#   labs(
-#     y = expression(alpha),
-#     x = NULL,
-#     title = "Posterior summaries of alpha across models"
-#   ) +
-#   theme_minimal(base_size = 14)
-# 
-# 
-# 
-# 
-# 
-# 
-# #=====================================================================================
-# # Plots to Show Regularization Behavior (PLOT 3)
-# #=====================================================================================
-# # a) Decay of Eigenvalues
-# par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
-# 
-# 
-# plot(S_diag_truncated_1, type = "l", log = "y", lwd = 2,
-#      main = "Decay of Eigenvalues (Penalty)",
-#      xlab = "KLE Basis Index (k)",
-#      ylab = "Eigenvalue (log scale)")
-# points(M_P_null_space_1, S_diag_truncated_1[M_P_null_space_1],
-#        col = "red", pch = 19, cex = 1.5)
-# mtext(paste("Null space modes:", M_P_null_space_1), side = 3, line = -1.5, adj = 0.05)
-# 
-# 
-# plot(S_diag_truncated_2, type = "l", log = "y", lwd = 2,
-#      main = "Decay of Eigenvalues (Penalty)",
-#      xlab = "KLE Basis Index (k)",
-#      ylab = "Eigenvalue (log scale)")
-# points(M_P_null_space_2, S_diag_truncated_2[M_P_null_space_2],
-#        col = "red", pch = 19, cex = 1.5)
-# mtext(paste("Null space modes:", M_P_null_space_2), side = 3, line = -1.5, adj = 0.05)
-# 
-# 
-# 
-# plot(S_diag_truncated_3, type = "l", log = "y", lwd = 2,
-#      main = "Decay of Eigenvalues (Penalty)",
-#      xlab = "KLE Basis Index (k)",
-#      ylab = "Eigenvalue (log scale)")
-# points(M_P_null_space_3, S_diag_truncated_3[M_P_null_space_3],
-#        col = "red", pch = 19, cex = 1.5)
-# mtext(paste("Null space modes:", M_P_null_space_3), side = 3, line = -1.5, adj = 0.05)
-# 
-# 
-# plot(S_diag_truncated_4, type = "l", log = "y", lwd = 2,
-#      main = "Decay of Eigenvalues (Penalty)",
-#      xlab = "KLE Basis Index (k)",
-#      ylab = "Eigenvalue (log scale)")
-# points(M_P_null_space_4, S_diag_truncated_4[M_P_null_space_4],
-#        col = "red", pch = 19, cex = 1.5)
-# mtext(paste("Null space modes:", M_P_null_space_4), side = 3, line = -1.5, adj = 0.05)
-# 
-# 
-# 
-# 
-# 
-# # ggplot version
-# 
-# # Combine all scenarios into one data frame
-# k1 = seq_along(S_diag_truncated_1)
-# k2 = seq_along(S_diag_truncated_2)
-# k3 = seq_along(S_diag_truncated_3)
-# k4 = seq_along(S_diag_truncated_4)
-# # Combine all scenarios into one data frame, including k
-# eigen_data <- bind_rows(
-#   data.frame(k = k1, Eigenvalue = S_diag_truncated_1,
-#              NullSpace = k1 %in% M_P_null_space_1,
-#              Scenario = "Sce. 1"),
-#   data.frame(k = k2, Eigenvalue = S_diag_truncated_2,
-#              NullSpace = k2 %in% M_P_null_space_2,
-#              Scenario = "Sce. 2"),
-#   data.frame(k = k3, Eigenvalue = S_diag_truncated_3,
-#              NullSpace = k3 %in% M_P_null_space_3,
-#              Scenario = "Sce. 3"),
-#   data.frame(k = k4, Eigenvalue = S_diag_truncated_4,
-#              NullSpace = k4 %in% M_P_null_space_4,
-#              Scenario = "Sce. 4")
-# )
-# 
-# # This is the single, clean version of your plot code.
-# #=====================================================================================
-# # 1. Create the ggplot visualization
-# #=====================================================================================
-# 
-# # Filter out any non-positive eigenvalues to remove the 'log-10' warning.
-# # This ensures that only valid, positive values are passed to the logarithmic scale.
-# eigen_data_clean <- eigen_data[eigen_data$Eigenvalue > 0, ]
-# ggplot(eigen_data_clean, aes(x = k, y = Eigenvalue)) +
-#   # Add a line plot for the overall eigenvalue decay
-#   geom_line(linewidth = 1) +
-#   # Use geom_point to highlight the null space modes.
-#   # The 'data' argument ensures points are only plotted for rows where NullSpace is TRUE.
-#   # The 'aes(color = "Null space mode")' creates a new color aesthetic that will
-#   # automatically generate a legend item for the red points.
-#   geom_point(data = subset(eigen_data_clean, NullSpace),
-#              aes(color = "Null space mode"), size = 3) +
-#   # Transform the y-axis to a logarithmic scale for better visualization of decay.
-#   scale_y_log10() +
-#   # Use facet_wrap to create separate plots for each 'Scenario'.
-#   # 'scales = "free_x"' allows the x-axis to be different for each facet.
-#   facet_wrap(~ Scenario, scales = "free_x") +
-#   # Use annotate() instead of geom_text() to add the static label "Null space mode".
-#   # This is the correct function for this task and removes the first warning message.
-#   # The position of the text is anchored to the top-left corner of each facet.
-#   annotate(
-#     "text",
-#     x = min(eigen_data_clean$k), y = max(eigen_data_clean$Eigenvalue),
-#     label = "Null space mode",
-#     hjust = -0.1, vjust = 1.5, size = 5, color = "black"
-#   ) +
-#   # Set the plot labels and title.
-#   # 'color = NULL' removes the title from the color legend.
-#   labs(title = "Decay of Eigenvalues (Penalty)",
-#     x = "KLE Basis Index (k)", y = "Eigenvalue (log scale)", color = NULL) +
-#   # Manually set the color for the "Null space mode" legend item.
-#   scale_color_manual(values = c("Null space mode" = "red")) +
-#   # Position the legend at the top of the plot.
-#   theme_bw(base_size = 14) +
-#   theme(legend.position = "none") +
-#   theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-#         # legend.text=element_text(size=14),
-#         strip.text.x = element_text(size = 14, colour = "black"),
-#         axis.ticks = element_line(color = "black"))
-# 
-# # Save as high-quality PDF
-# ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot3.pdf",
-#        plot = plot3,        # Replace with your ggplot object name
-#        device = cairo_pdf,    # Good for embedding text as text
-#        width = 8,             # Width in inches
-#        height = 6,            # Height in inches
-#        dpi = 300              # Only affects raster elements, safe to keep high
-# )
-# 
-# 
-# 
-# 
-# # For this example, we will generate some dummy data to represent
-# # the MCMC posterior samples for the 'Z' coefficients.
-# # 'Z' is often a matrix with dimensions [Number of MCMC samples, Number of coefficients].
-# set.seed(42)
-# num_samples <- 100  # Number of MCMC iterations
-# num_coefficients <- 10 # Number of Z coefficients
-# 
-# # Simulate samples for the TPS model with a smaller standard deviation
-# z_tps_mcmc_samples <- rstan::extract(mcmc_tps1)$Z
-# 
-# # Simulate samples for the SPDE model with a larger standard deviation
-# u_spde_mcmc_samples <- rstan::extract(mcmc_spde1)$u
-# #=====================================================================================
-# # 2. Calculate standard deviations from posterior samples
-# #=====================================================================================
-# 
-# # Calculate the standard deviation for each Z coefficient across all MCMC samples.
-# # The `apply` function is used to apply the `sd` function to each column (MARGIN = 2)
-# # of the matrix of posterior samples.
-# sd_tps <- apply(z_tps_mcmc_samples, 2, sd)
-# sd_spde <- apply(u_spde_mcmc_samples, 2, sd)
-# 
-# 
-# #=====================================================================================
-# # 3. Prepare data for ggplot visualization
-# #=====================================================================================
-# 
-# # Combine the standard deviations into a single data frame for plotting.
-# sd_data_tps <- data.frame(Coefficient_SD = c(sd_tps),
-#   Method = factor(rep(c("TPS"), each = length(z_tps_mcmc_samples))))
-# 
-# 
-# 
-# sd_data_spde <- data.frame(Coefficient_SD = c(sd_spde),
-#                       Method = factor(rep(c("SPDE"), each = length(u_spde_mcmc_samples))))
-# 
-# #=====================================================================================
-# # 4. Create the ggplot visualization
-# #=====================================================================================
-# 
-# # Create a density plot to compare the distributions of the standard deviations.
-# # Density plots are great for visualizing the overall shape of the distribution.
-# p_sd_tps <- ggplot(sd_data_tps, aes(x = Coefficient_SD, fill = Method)) +
-#   geom_density(alpha = 0.6) +
-#   labs(
-#     title = "Comparison of Posterior Standard Deviations for Z Coefficients",
-#     x = "Standard Deviation of Z Coefficients",
-#     y = "Density",
-#     fill = "Method"
-#   ) +
-#   theme_bw(base_size = 14) +
-#   # Customize the color scale and legend position
-#   scale_fill_manual(values = c("TPS" = "blue")) +
-#   theme(legend.position = "top")
-# 
-# # Print the final plot
-# print(p_sd_tps)
-# 
-# 
-# 
-# 
-# p_sd_spde <- ggplot(sd_data_spde, aes(x = Coefficient_SD, fill = Method)) +
-#   geom_density(alpha = 0.6) +
-#   labs(
-#     title = "Comparison of Posterior Standard Deviations for Z Coefficients",
-#     x = "Standard Deviation of Z Coefficients",
-#     y = "Density",
-#     fill = "Method"
-#   ) +
-#   theme_bw(base_size = 14) +
-#   # Customize the color scale and legend position
-#   scale_fill_manual(values = c("TPS" = "blue", "SPDE" = "green")) +
-#   theme(legend.position = "top")
-# 
-# # Print the final plot
-# print(p_sd_spde)
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# # ------------------------------------------------------------
-# # Function to create multiple mesh scenarios
-# # ------------------------------------------------------------
-# mesh_scenarios <- function(base_N_sp = 50, n_scenarios = 4) {
-#   scenarios <- list()
-#   for (i in 1:n_scenarios) {
-#     set.seed(i)
-#     N_sp <- base_N_sp * i
-#     sp_points <- data.frame(s1 = runif(N_sp), s2 = runif(N_sp))
-#     sp_matrix <- as.matrix(sp_points)
-#     bound1 <- inla.nonconvex.hull(sp_matrix)
-#     mesh <- inla.mesh.create(loc = sp_matrix, boundary = bound1, refine = FALSE, plot.delay = NULL)
-#     
-#     scenario_name <- paste0("scenario", i)
-#     scenarios[[scenario_name]] <- list(
-#       N_sp = N_sp, sp_points = sp_points,
-#       mesh = mesh,
-#       n_triangles = nrow(mesh$graph$tv),
-#       n_nodes = mesh$n
-#     )
-#     
-#     cat(paste("Scenario", i, "created with", mesh$n, "vertices.\n"))
-#   }
-#   return(scenarios)
-# }
-# 
-# # ------------------------------------------------------------
-# # Modified run_tmb to accept M_truncation
-# # ------------------------------------------------------------
-# run_tmb <- function(N_sp, dim_grid, sp_points, mesh, M_truncation = NULL){
-#   set.seed(1234)
-#   
-#   n_nodes <- mesh$n
-#   k_basis <- floor(0.95 * N_sp)
-#   sigma0_error <- 0.1
-#   
-#   # Simulate spatial data
-#   matern_cov <- function(coords, nu = 1.5, rho = 0.2, sigma2 = 1.0) {
-#     D <- as.matrix(dist(coords))
-#     D[D == 0] <- 1e-10
-#     scaling <- (sqrt(2 * nu) * D) / rho
-#     matern_part <- (2^(1 - nu)) / gamma(nu) * scaling^nu * besselK(scaling, nu)
-#     diag(matern_part) <- 1
-#     return(sigma2 * matern_part)
-#   }
-#   
-#   Cov_true_obs <- matern_cov(sp_points)
-#   true_field_obs <- mvrnorm(1, mu = rep(0, N_sp), Sigma = Cov_true_obs)
-#   y_obs <- true_field_obs + rnorm(N_sp, 0, sigma0_error)
-#   
-#   # Grid for prediction
-#   s1_grid <- seq(0, 1, length.out = dim_grid)
-#   s2_grid <- seq(0, 1, length.out = dim_grid)
-#   grid_total <- expand.grid(s1 = s1_grid, s2 = s2_grid)
-#   
-#   # Smooth basis setup
-#   data_smooth <- data.frame(s1 = sp_points$s1, s2 = sp_points$s2, y_obs = y_obs)
-#   sm <- smoothCon(s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth, absorb.cons = FALSE)[[1]]
-#   gam_fit <- gam(y_obs ~ s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth)
-#   
-#   Phi_basis_sp <- predict(gam_fit, newdata = sp_points, type = "lpmatrix")
-#   Phi_basis_grid <- predict(gam_fit, newdata = grid_total, type = "lpmatrix")
-#   
-#   # Penalty
-#   S_grid <- sm$S[[1]]
-#   S_eig <- eigen(S_grid, symmetric = TRUE)
-#   S_diag <- S_eig$values
-#   evectors <- S_eig$vectors
-#   order_idx <- order(S_diag, decreasing = TRUE)
-#   S_diag <- S_diag[order_idx]
-#   evectors <- evectors[, order_idx]
-#   
-#   M_P_null_space <- sm$null.space.dim
-#   
-#   # Set M_truncation if not provided
-#   # Set M_truncation if not provided
-#   if (is.null(M_truncation)) {
-#     M_truncation <- min(k_basis, n_nodes)
-#   }
-#   # Ensure it is at least null space dimension and not more than available eigenvectors
-#   M_truncation <- max(M_P_null_space, min(M_truncation, length(S_diag)))
-#   
-#   
-#   # Precompute KLE bases
-#   Phi_kle_sp <- Phi_basis_sp %*% evectors[, 1:M_truncation]
-#   Phi_kle_grid <- Phi_basis_grid %*% evectors[, 1:M_truncation]
-#   S_diag_truncated <- S_diag[1:M_truncation]
-#   
-#   # TMB setup
-#   tmb_data <- list(
-#     y = y_obs,
-#     Phi_kle_sp = Phi_kle_sp,
-#     Phi_kle_grid = Phi_kle_grid,
-#     S_diag_truncated = S_diag_truncated,
-#     M_P_null_space = M_P_null_space
-#   )
-#   tmb_par <- list(
-#     Z = rep(0, M_truncation),
-#     logsigma = log(0.5),
-#     logalpha = log(1.0)
-#   )
-#   
-#   obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "tps_kle", random = "Z")
-#   opt <- nlminb(obj$par, obj$fn, obj$gr)
-#   rep_tmb <- sdreport(obj)
-#   
-#   return(list(obj = obj, opt = opt, rep_tmb = rep_tmb, M_truncation = M_truncation))
-# }
-# 
-# # ------------------------------------------------------------
-# # Generate mesh scenarios
-# # ------------------------------------------------------------
-# base_N_sp <- 50
-# n_scenarios <- 4
-# scenarios <- mesh_scenarios(base_N_sp = base_N_sp, n_scenarios = n_scenarios)
-# 
-# # ------------------------------------------------------------
-# # Run TMB for multiple M_truncation values across all scenarios
-# # ------------------------------------------------------------
-# M_trunc_vals <- c(10, 20, 30, 40, 50)
-# dim_grid <- 20
-# 
-# all_results <- list()
-# 
-# for (scenario_name in names(scenarios)) {
-#   cat("Running scenario:", scenario_name, "\n")
-#   sc <- scenarios[[scenario_name]]
-#   
-#   scenario_results <- lapply(M_trunc_vals, function(M) {
-#     res <- run_tmb(N_sp = sc$N_sp, dim_grid = dim_grid,
-#                    sp_points = sc$sp_points, mesh = sc$mesh,
-#                    M_truncation = M)
-#     log_evidence <- -res$obj$fn(res$opt$par) # Laplace approx.
-#     list(M_truncation = M, log_evidence = log_evidence, res = res)
-#   })
-#   
-#   all_results[[scenario_name]] <- scenario_results
-# }
-# 
-# # ------------------------------------------------------------
-# # Summarize log model evidence
-# # ------------------------------------------------------------
-# summary_table <- do.call(rbind, lapply(names(all_results), function(sname) {
-#   df <- do.call(rbind, lapply(all_results[[sname]], function(x) {
-#     data.frame(M_truncation = x$M_truncation, log_evidence = x$log_evidence)
-#   }))
-#   df$scenario <- sname
-#   df
-# }))
-# 
-# print(summary_table)
-# 
-# # Plot
-# ggplot(summary_table, aes(x = M_truncation, y = log_evidence, color = scenario)) +
-#   geom_line() + geom_point() +
-#   labs(title = "Laplace-approximated model evidence vs M_truncation",
-#        x = "M_truncation", y = "Log model evidence")
-# 
-# 
-# scenario_results[[3]]
-# 
-# 
-# 
-# 
-# 
-# # Create a list to store tmbstan fits
-# stan_fits <- list()
-# 
-# # Loop over scenarios
-# for (scenario_name in names(all_results)) {
-#   
-#   scenario_results <- all_results[[scenario_name]]
-#   
-#   # Loop over M_truncation values for this scenario
-#   for (res_item in scenario_results) {
-#     
-#     M_val <- res_item$M_truncation
-#     cat("Running tmbstan for", scenario_name, "with M_truncation =", M_val, "\n")
-#     
-#     # Extract the MakeADFun object
-#     tmb_obj <- res_item$res$obj
-#     
-#     # Run tmbstan
-#     stan_fit <- tmbstan(tmb_obj, chains = 2, iter = 1000, warmup = 500, control = list(adapt_delta = 0.95))
-#     
-#     # Store the fit in a nested list
-#     stan_fits[[scenario_name]][[paste0("M_", M_val)]] <- stan_fit
-#   }
-# }
-# 
-# 
-# 
-# 
-# 
-# 
-# # This R code helps you evaluate the quality of your TPS approximation
-# # by visualizing the decay of the eigenvalues.
-# # It assumes you have already run the TMB model and have the 'tmb_tps' object.
-# 
-# # Load the necessary libraries
-# library(ggplot2)
-# 
-# # --- 1. Extract the TMB object and singular values ---
-# 
-# # The TMB object is located within your 'tmb_tps' list.
-# # We'll extract the 'obj' component which contains the data for the model.
-# tmb_obj <- tmb_tps[[1]][[4]]
-# 
-# 
-# # --- End of code ---
-# 
-# 
-# 
-# 
-# 
-# # --- 3. Plot the eigenvalue decay for all scenarios ---
-# 
-# # Create the plot using ggplot2 with facet_wrap.
-# # We'll plot the eigenvalue value against its rank.
-# eigenvalue_plot <- ggplot(combined_data, aes(x = k, y = eigenvalue)) +
-#   geom_point(aes(color = scenario), size = 2) +
-#   geom_line(aes(color = scenario), size = 1) +
-#   facet_wrap(~ scenario, scales = "free_y") + # 'free_y' allows different y-axes for clarity
-#   labs(
-#     title = "Decay of Eigenvalues for regTPS-KLE",
-#     subtitle = "A rapid drop indicates a good low-rank approximation.",
-#     x = "Eigenvalue Rank (k)",
-#     y = expression(lambda[k])
-#   ) +
-#   theme_grey(base_size = 14) +
-#   theme(
-#     plot.title = element_text(face = "bold", hjust = 0.5),
-#     plot.subtitle = element_text(hjust = 0.5),
-#     legend.position = "none", # Legend is not needed with facets
-#     panel.grid.major = element_line(color = "gray90"),
-#     panel.grid.minor = element_blank()
-#   )
-# 
-# # --- 4. Calculate and plot cumulative variance explained ---
-# 
-# # We need to re-process the combined data to get cumulative sums per scenario.
-# combined_data_cum <- combined_data %>%
-#   group_by(scenario) %>%
-#   mutate(cumulative_variance_explained = cumsum(eigenvalue) / sum(eigenvalue)) %>%
-#   ungroup()
-# 
-# # Create a new plot for cumulative variance explained
-# cumulative_plot <- ggplot(combined_data_cum, aes(x = k, y = cumulative_variance_explained)) +
-#   geom_line(aes(color = scenario), size = 1.2) +
-#   geom_hline(yintercept = 0.95, linetype = "dashed", color = "red") +
-#   geom_text(aes(x = max(k) * 0.8, y = 0.95, label = "95% Threshold"),
-#             vjust = 1.0, color = "red", size = 4) +
-#   facet_wrap(~ scenario) +
-#   labs(
-#     title = "Cumulative Variance Explained by regTPS-KLE",
-#     # subtitle = "A measure of how much variance is captured by the first k terms.",
-#     x = "Number of Basis Functions (k)",
-#     y = "Cumulative Proportion of Variance"
-#   ) +
-#   theme_grey(base_size = 14) +
-#   theme(
-#     plot.title = element_text(face = "bold", hjust = 0.5),
-#     plot.subtitle = element_text(hjust = 0.5),
-#     legend.position = "none", # Legend is not needed with facets
-#     panel.grid.major = element_line(color = "gray90"),
-#     panel.grid.minor = element_blank()
-#   )
-# 
-# # --- 5. Combine and print the plots ---
-# 
-# # Use patchwork to combine the two plots. The '/' operator stacks them vertically.
-# combined_plots <- eigenvalue_plot / cumulative_plot
-# 
-# # Print the combined plot
-# print(combined_plots)
-# 
-# # Save as high-quality PDF
-# ggsave(filename = "C:/Users/Usuario/Desktop/KLE/plots/plot3_combined_v2.pdf",
-#        plot = combined_plots,        # Replace with your ggplot object name
-#        device = cairo_pdf,    # Good for embedding text as text
-#        width = 10,             # Width in inches
-#        height = 8,            # Height in inches
-#        dpi = 300              # Only affects raster elements, safe to keep high
-# )
