@@ -208,7 +208,7 @@ my_theme <- theme_bw(base_size = 14) +
     plot.margin = margin(15, 15, 15, 15)
   )
 
-# ==================== OPTION 1: Facet by Covariance Function ====================
+# ==================== Facet by Covariance Function ====================
 p_facet_by_cov <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency, 
                                                color = Method, group = Method)) + 
   geom_line(size = 1.2, alpha = 0.8) +
@@ -226,7 +226,7 @@ p_facet_by_cov <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   my_theme +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 6))
 
-# ==================== OPTION 2: Facet by Method ====================
+# ==================== Facet by Method ====================
 p_facet_by_method <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency, 
                                                   color = Covariance, group = Covariance)) + 
   geom_line(size = 1.2, alpha = 0.8) +
@@ -244,7 +244,7 @@ p_facet_by_method <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   my_theme +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 6))
 
-# ==================== OPTION 3: Facet by Both (Grid) ====================
+# ==================== Facet by Both (Grid) ====================
 p_facet_grid <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency, 
                                              color = Method, group = Method)) + 
   geom_line(size = 0.8, alpha = 0.8) +
@@ -263,7 +263,7 @@ p_facet_grid <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency,
   theme(legend.position = "none") +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 5))
 
-# ==================== OPTION 4: Facet with 2 columns side by side ====================
+# ==================== Facet with 2 columns side by side ====================
 p_facet_horizontal <- ggplot(df_plot_combined, aes(x = Scenario, y = Efficiency, 
                                                    color = Method, group = Method)) + 
   geom_line(size = 1.2, alpha = 0.8) +
