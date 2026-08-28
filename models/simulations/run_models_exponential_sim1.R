@@ -20,8 +20,8 @@ dyn.load(dynlib("spde"))
 
 #==================================
 # Compile the model and load it
-compile("tps_kle.cpp")
-dyn.load(dynlib("tps_kle"))
+compile("regTPS_KLE.cpp")
+dyn.load(dynlib("regTPS_KLE"))
 
 
 
@@ -127,9 +127,6 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # STANDARD EIGENDECOMPOSITION
   #====================================
-  
-  cat("  Using standard eigenvalue problem (S ψ = v ψ)\n")
-  
   # Standard eigendecomposition: S ψ = v ψ
   S_eig <- eigen(S, symmetric = TRUE)
   S_diag <- S_eig$values
@@ -158,14 +155,9 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   
   M_P_null_space <- sm$null.space.dim
   
-  cat("  Null space dimension:", M_P_null_space, "\n")
-  cat("  Total basis functions:", length(S_diag), "\n")
-  cat("  Non-zero eigenvalues:", sum(S_diag > 1e-10), "\n")
-  
   #====================================
   # VARIANCE-BASED TRUNCATION
   #====================================
-  cat("  Computing variance-based truncation...\n")
   # Non-zero eigenvalues (penalized subspace)
   nonzero_eigs <- S_diag[S_diag > 1e-10]
   
@@ -173,44 +165,31 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
     stop("No non-zero eigenvalues found.")
   }
   
-  cat("  Reference alpha for truncation:", alpha_ref, "\n")
-  
   # Prior variances implied by alpha_ref
   lambda_k <- 1 / (1 + alpha_ref * S_diag)
-  
   # Null-space components are unpenalized
   lambda_k[1:M_P_null_space] <- 1
-  
   # Total prior variance
   total_variance <- sum(lambda_k)
-  
   # Cumulative variance explained
   cumvar <- cumsum(lambda_k) / total_variance
-  
   # Smallest M explaining the requested variance
   M_truncation <- which(cumvar >= variance_threshold)[1]
-  
   if(is.na(M_truncation)){
     M_truncation <- length(S_diag)
   }
   
-  cat("  Initial M_truncation (", variance_threshold*100, "% variance):", M_truncation,"\n")
-  
   #----------------------------------------
-  # Safety checks
+  # Checks
   #----------------------------------------
   M_truncation <- max(M_truncation, M_P_null_space + 5)
   M_truncation <- min(M_truncation, k_basis, n_nodes)
   
   var_explained <- sum(lambda_k[1:M_truncation]) / total_variance
   
-  cat("  Final M_truncation:", M_truncation, "\n")
-  cat("  Variance explained:", round(100*var_explained,2), "%\n")
-  
   #------------------------------------
   # CREATE TRUNCATED MATRICES
   #------------------------------------
-  
   Phi_kle_sp <- Phi_basis_sp %*% evectors[, 1:M_truncation]
   Phi_kle_grid <- Phi_basis_grid %*% evectors[, 1:M_truncation]
   S_diag_truncated <- S_diag[1:M_truncation]
@@ -248,8 +227,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # FIT MODEL
   #====================================
-  cat("  Fitting TMB model...\n")
-  obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "tps_kle", random = "z_tilde")
+  obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "regTPS_KLE", random = "z_tilde")
   opt <- nlminb(obj$par, obj$fn, obj$gr, control = list(eval.max = 1000, iter.max = 500))
   
   if(opt$convergence != 0) {
@@ -479,122 +457,3 @@ for (i in 1:length(M)){
   saveRDS(fit, file=paste0('outputs/stan_tps_expo_', i,'.RDS'))
 }
 
-
-
-
-# Plotting (assuming grid_total coordinates are still dim_grid x dim_grid)
-par(mfrow = c(4, 3))
-image(matrix(fits_TMB_tps[[1]]$u_true_grid, 30, 30), main = "True GRF 1",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[1]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[1]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[1]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[1]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-image(matrix(fits_TMB_tps[[2]]$u_true_grid, 30, 30), main = "True GRF 2",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[2]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[2]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[2]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[2]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-image(matrix(fits_TMB_tps[[3]]$u_true_grid, 30, 30), main = "True GRF 3",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[3]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[3]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[3]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[3]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-image(matrix(fits_TMB_tps[[4]]$u_true_grid, 30, 30), main = "True GRF 4",
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_spde[[4]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (spde=", fits_TMB_spde[[4]][[6]]$n, ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-image(matrix(fits_TMB_tps[[4]][[1]]$report()$field_grid, 30, 30), main = paste0("Estimated GRF (M_KLE=", fits_TMB_tps[[4]][[6]], ")"),
-      col = hcl.colors(100, "viridis"), asp = 1)
-
-
-
-
-#=================
-# Scenario 1 
-#=================
-
-rmse_spde <- sqrt(mean((tmb_spde[[1]]$obj$report()$field_grid - tmb_spde[[1]][[9]])^2))
-r2_spde   <- cor(as.vector(tmb_spde[[1]]$obj$report()$field_grid), tmb_spde[[1]][[9]])^2
-mae_spde  <- mean(abs(as.vector(tmb_spde[[1]]$obj$report()$field_grid) - tmb_spde[[1]][[9]]))
-
-rmse_tps <- sqrt(mean((tmb_tps[[1]]$obj$report()$field_grid - tmb_tps[[1]][[11]])^2))
-r2_tps   <- cor(as.vector(tmb_tps[[1]]$obj$report()$field_grid), tmb_tps[[1]][[11]])^2
-mae_tps  <- mean(abs(tmb_tps[[1]]$obj$report()$field_grid - tmb_tps[[1]][[11]]))
-
-# Comparative table scenario 1
-metrics_scenario1 <- data.frame(Metric = c("RMSE", "R²", "MAE"),
-                                SPDE   = c(rmse_spde, r2_spde, mae_spde),
-                                TPS    = c(rmse_tps, r2_tps, mae_tps))
-print(metrics_scenario1, row.names = FALSE)
-
-# Comparative table scenario 1
-# metrics_scenario1 <- data.frame(Metric = c("RMSE", "R²", "MAE"),
-#                                 GRF   = c(rmse_grf, r2_grf, mae_grf),
-#                                 SPDE   = c(rmse_spde, r2_spde, mae_spde),
-#                                 TPS    = c(rmse_tps, r2_tps, mae_tps))
-# print(metrics_scenario1, row.names = FALSE)
-
-
-
-#=================
-# Scenario 2 
-#=================
-rmse_spde2 <- sqrt(mean((spde_field_grid[[2]] - tmb_spde[[2]][[9]])^2))
-r2_spde2   <- cor(as.vector(spde_field_grid[[2]]), tmb_spde[[2]][[9]])^2
-mae_spde2  <- mean(abs(as.vector(spde_field_grid[[2]]) - tmb_spde[[2]][[9]]))
-
-rmse_tps2 <- sqrt(mean((tps_field_grid[[2]] - tmb_tps[[2]][[11]])^2))
-r2_tps2   <- cor(as.vector(tps_field_grid[[2]]), tmb_tps[[2]][[11]])^2
-mae_tps2  <- mean(abs(tps_field_grid[[2]] - tmb_tps[[2]][[11]]))
-
-# Comparative table scenario 2
-metrics_scenario2 <- data.frame(Metric = c("RMSE", "R²", "MAE"),
-                                SPDE   = c(rmse_spde2, r2_spde2, mae_spde2),
-                                TPS    = c(rmse_tps2, r2_tps2, mae_tps2))
-print(metrics_scenario2, row.names = FALSE)
-
-#=================
-# Scenario 3
-#=================
-rmse_spde3 <- sqrt(mean((spde_field_grid[[3]] - tmb_spde[[3]][[9]])^2))
-r2_spde3   <- cor(as.vector(spde_field_grid[[3]]), tmb_spde[[3]][[9]])^2
-mae_spde3  <- mean(abs(as.vector(spde_field_grid[[3]]) - tmb_spde[[3]][[9]]))
-
-rmse_tps3 <- sqrt(mean((tps_field_grid[[3]] - tmb_tps[[3]][[11]])^2))
-r2_tps3   <- cor(as.vector(tps_field_grid[[3]]), tmb_tps[[3]][[11]])^2
-mae_tps3  <- mean(abs(tps_field_grid[[3]] - tmb_tps[[3]][[11]]))
-
-# Comparative table scenario 3
-metrics_scenario3 <- data.frame(Metric = c("RMSE", "R²", "MAE"),
-                                SPDE   = c(rmse_spde3, r2_spde3, mae_spde3),
-                                TPS    = c(rmse_tps3, r2_tps3, mae_tps3))
-print(metrics_scenario3, row.names = FALSE)
-
-
-
-#=================
-# Scenario 4
-#=================
-rmse_spde4 <- sqrt(mean((spde_field_grid[[4]] - tmb_spde[[4]][[9]])^2))
-r2_spde4   <- cor(as.vector(spde_field_grid[[4]]), tmb_spde[[4]][[9]])^2
-mae_spde4  <- mean(abs(as.vector(spde_field_grid[[4]]) - tmb_spde[[4]][[9]]))
-
-rmse_tps4 <- sqrt(mean((tps_field_grid[[4]] - tmb_tps[[4]][[11]])^2))
-r2_tps4   <- cor(as.vector(tps_field_grid[[4]]), tmb_tps[[4]][[11]])^2
-mae_tps4  <- mean(abs(tps_field_grid[[4]] - tmb_tps[[4]][[11]]))
-
-
-# Comparative table scenario 4
-metrics_scenario4 <- data.frame(Metric = c("RMSE", "R²", "MAE"),
-                                SPDE   = c(rmse_spde4, r2_spde4, mae_spde4),
-                                TPS    = c(rmse_tps4, r2_tps4, mae_tps4))
-print(metrics_scenario4, row.names = FALSE)
