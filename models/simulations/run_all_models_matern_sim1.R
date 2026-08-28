@@ -1,4 +1,4 @@
-setwd("")
+setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE")
 rm(list = ls())
 
 options(scipen = 999)
@@ -7,18 +7,21 @@ library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
                TMB, tmbstan, mgcv, MASS, INLA, geigen, fmesher)
 
+
 # Calculate the number of cores
 no_cores <- parallelly::availableCores() - 1  
+
 
 # #==================================
 # # Compile the model and load it
 compile("spde.cpp", clean = TRUE)
 dyn.load(dynlib("spde"))
 
+
 #==================================
 # Compile the model and load it
-compile("regTPS_KLE.cpp", clean = TRUE)
-dyn.load(dynlib("regTPS_KLE"))
+compile("tps_kle.cpp", clean = TRUE)
+dyn.load(dynlib("tps_kle"))
 
 
 #=====================================================================================
@@ -42,6 +45,7 @@ run_tmb_spde <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true, u_grid,
   # Set up SPDE model
   spde <- inla.spde2.matern(mesh, alpha = 2)
   spde_mat <- spde$param.inla[c("M0", "M1", "M2")]
+
   
   #=================================
   # TMB data
@@ -98,12 +102,16 @@ run_tmb_spde <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true, u_grid,
 }
 
 
+
+
+
+
 #=========================
 # Run regTPS-KLE models
 #=========================
 
 run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, k_basis, Cov_true,
-                        variance_threshold = 0.95, alpha_ref = 1) {
+                        variance_threshold = 0.99, alpha_ref = 1) {
   
   n_nodes <- mesh$n
   # Setup Basis and Penalty
@@ -111,6 +119,8 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   sm <- mgcv::smoothCon(s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth, absorb.cons = FALSE)[[1]]
   
   # Get design matrices
+  # NOTE: grid_total must be defined in the calling environment (as in your
+  # scalability loop) since it is not passed as a function argument here.
   Phi_basis_sp   <- PredictMat(sm, data_smooth)
   Phi_basis_grid <- PredictMat(sm, grid_total)
   
@@ -121,10 +131,16 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # STANDARD EIGENDECOMPOSITION
   #====================================
+  cat("  Using standard eigenvalue problem (S \u03c8 = v \u03c8)\n")
+  
   # Standard eigendecomposition: S psi = v psi
   S_eig <- eigen(S, symmetric = TRUE)
   S_diag <- S_eig$values
   evectors <- S_eig$vectors
+  
+  #====================================
+  # CLEAN AND ORDER EIGENVALUES 
+  #====================================
   
   # Clean small eigenvalues
   S_diag[abs(S_diag) < 1e-12] <- 0
@@ -142,15 +158,22 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   
   M_P_null_space <- sm$null.space.dim
   
+  cat("  Null space dimension:", M_P_null_space, "\n")
+  cat("  Total basis functions:", length(S_diag), "\n")
+  cat("  Non-zero eigenvalues:", sum(S_diag > 1e-10), "\n")
+  
   #====================================
   # VARIANCE-BASED TRUNCATION
   #====================================
   nonzero_eigs <- S_diag[S_diag > 1e-10]
   if (length(nonzero_eigs) == 0) stop("No non-zero eigenvalues found.")
+  
   alpha_ref_scaled <- alpha_ref / median(nonzero_eigs)
+  
   cat("  Reference alpha (raw):", alpha_ref,
       " | median(v_k):", round(median(nonzero_eigs), 4),
       " | effective alpha used:", round(alpha_ref_scaled, 6), "\n")
+  
   lambda_k <- 1 / (1 + alpha_ref_scaled * S_diag)
   
   # Null-space components are unpenalized
@@ -168,6 +191,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   if(is.na(M_truncation)){
     M_truncation <- length(S_diag)
   }
+  
   cat("  Initial M_truncation (", variance_threshold*100, "% variance):", M_truncation,"\n")
   
   #----------------------------------------
@@ -180,7 +204,9 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
     warning("M_truncation < null space dimension; increasing to match.")
     M_truncation <- M_P_null_space
   }
+  
   var_explained <- sum(lambda_k[1:M_truncation]) / total_variance
+  
   cat("  Final M_truncation:", M_truncation, "\n")
   cat("  Variance explained:", round(100*var_explained,2), "%\n")
   
@@ -216,6 +242,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # TMB PARAMETERS
   #====================================
+  
   tmb_par <- list(z_tilde = rep(0, M_truncation),
                   logsigma = logsigma_init,
                   logalpha = logalpha_init)
@@ -223,7 +250,8 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # FIT MODEL
   #====================================
-  obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "regTPS-KLE", random = "z_tilde")
+  cat("  Fitting TMB model...\n")
+  obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "tps_kle", random = "z_tilde")
   opt <- nlminb(obj$par, obj$fn, obj$gr, control = list(eval.max = 1000, iter.max = 500))
   
   if(opt$convergence != 0) {
@@ -241,11 +269,28 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   #====================================
   # RETURN RESULTS
   #====================================
-  res_list <- list(obj = obj,  opt = opt, rep_tmb = rep_tmb, tmb_data = tmb_data, tmb_par = tmb_par, 
-                   M_truncation = M_truncation, variance_explained = var_explained, k_basis = k_basis, 
-                   n_nodes = n_nodes, sp_points = sp_points, u_true_sp = u_true_sp, u_true_grid = u_true_grid, 
-                   S_diag_full = S_diag, S_diag_truncated = S_diag_truncated, lambda_k = lambda_k,
-                   evectors = evectors,  sm = sm, Cov_true = Cov_true)
+  
+  res_list <- list(
+    obj = obj, 
+    opt = opt, 
+    rep_tmb = rep_tmb, 
+    tmb_data = tmb_data, 
+    tmb_par = tmb_par, 
+    M_truncation = M_truncation, 
+    variance_explained = var_explained, 
+    k_basis = k_basis, 
+    n_nodes = n_nodes,
+    sp_points = sp_points,
+    u_true_sp = u_true_sp, 
+    u_true_grid = u_true_grid, 
+    S_diag_full = S_diag, 
+    S_diag_truncated = S_diag_truncated, 
+    lambda_k = lambda_k,
+    evectors = evectors,  
+    sm = sm,
+    cumvar = cumvar,
+    Cov_true = Cov_true
+  )
   
   return(res_list)
 }
@@ -262,6 +307,9 @@ sigma_u0 <- 1.0
 sigma_e0 <- 0.3
 nu <- 1.0
 rho0 <- 0.3
+
+sigma_alpha = 3.0
+
 
 # Matern covariance function used for simulation
 matern_cov <- function(coords, nu, rho, sigma2) {
@@ -315,11 +363,16 @@ for (i in 1:n_scenarios) {
   # Get number of mesh nodes from SPDE
   n_mesh_nodes <- mesh$n
   
+  cat("\n=== Comparison Setup ===\n")
+  cat("N observations:", N_sp, "\n")
+  cat("SPDE mesh nodes:", n_mesh_nodes, "\n")
+  
   #====================================
   # COMPARISON STRATEGY FOR regTPS-KLE
   #====================================
   k_basis_max <- floor(0.99 * N_sp)    # Conservative: 99% of data points
   k_basis_max <- max(k_basis_max, 10)  # At least 10 basis functions
+  
   
   if(k_basis_max < n_mesh_nodes) {
     cat("Note: TPS k_basis (", k_basis_max, ") < SPDE nodes (", n_mesh_nodes, ")\n")
@@ -330,12 +383,42 @@ for (i in 1:n_scenarios) {
   }
   
   # Run TPS model
+  cat("\n--- Running TPS model ---\n")
   obj_tps <- run_tmb_tps(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, 
-                         k_basis = k_basis_max, Cov_true, variance_threshold = 0.99, alpha_ref = 1)
+                         k_basis = k_basis_max, 
+                         Cov_true, 
+                         variance_threshold = 0.99, 
+                         alpha_ref = 1)
+  
+  #====================================
+  # COMPARISON SUMMARY
+  #====================================
+  
+  cat("\n=== Final Comparison ===\n")
+  cat("SPDE:\n")
+  cat("  Basis functions used:", n_mesh_nodes, "\n")
+  cat("  (all mesh nodes)\n")
+  
+  cat("\nTPS:\n")
+  cat("  Available k_basis:", k_basis_max, "\n")
+  cat("  Selected M_truncation:", obj_tps$M_truncation, "\n")
+  cat("  Variance explained:", round(obj_tps$variance_explained * 100, 2), "%\n")
+  
+  cat("\nEfficiency:\n")
+  cat("  TPS uses", obj_tps$M_truncation, "basis functions vs SPDE's", n_mesh_nodes, "\n")
+  cat("  Ratio (TPS/SPDE):", round(obj_tps$M_truncation / n_mesh_nodes, 3), "\n")
+  
+  if(obj_tps$M_truncation < n_mesh_nodes) {
+    reduction_pct <- round((1 - obj_tps$M_truncation / n_mesh_nodes) * 100, 1)
+    cat("  TPS achieves", reduction_pct, "% reduction in basis functions\n")
+    cat("  while maintaining", round(obj_tps$variance_explained * 100, 1), "% variance\n")
+  }
   
   fits_TMB_spde[[i]] <- obj_spde
   fits_TMB_tps[[i]] <- obj_tps
 }
+
+
 
 
 #====================================
@@ -350,7 +433,7 @@ saveRDS(fits_TMB_tps, file = 'outputs/fits_TMB_tps.RDS')
 
 
 #============================
-# SPDE - MCMC models
+# SPDE - Stan models
 #============================
 M = list()
 M[[1]] = list()
@@ -382,14 +465,20 @@ for (i in 1:length(M)){
                  control = list(max_treedepth= 12,  adapt_delta = 0.9),
                  iter = 3000, warmup= 700, cores=no_cores,
                  lower = lwr, upper = upr, seed = 1234)
+                 # init = 'last.par.best', seed = 12345)
   endTime <- Sys.time()
   timeUsed = difftime(endTime, startTime, units='mins')
   print(timeUsed)
-  saveRDS(fit, file=paste0('outputs/mcmc_spde_', i,'.RDS'))
+  saveRDS(fit, file=paste0('outputs/stan_spde_', i,'.RDS'))
 }
 
+
+
+
+
+
 #============================
-# regTPS-KLE - MCMC models
+# regTPS-KLE - Stan models
 #============================
 M = list()
 M[[1]] = list()
@@ -420,5 +509,15 @@ for (i in 1:length(M)){
   endTime <- Sys.time()
   timeUsed = difftime(endTime, startTime, units='mins')
   print(timeUsed)
-  saveRDS(fit, file=paste0('outputs/mcmc_tps_', i,'.RDS'))
+  saveRDS(fit, file=paste0('outputs/stan_tps_', i,'.RDS'))
 }
+
+
+
+
+
+
+
+
+
+
