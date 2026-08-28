@@ -78,8 +78,6 @@ Type objective_function<Type>::operator() ()
   DATA_SCALAR(s0_u);        // e.g. 1.0
   DATA_SCALAR(alpha_s_u);   // e.g. 0.05
   
-  DATA_SCALAR(cauchy_scale_e); // e.g. 5.0 (unused if using PC exponential obs prior)
-  
 
   //=========================
   //   PARAMETER SECTION
@@ -87,35 +85,33 @@ Type objective_function<Type>::operator() ()
   PARAMETER(logsigma_e);
   PARAMETER(logrho);
   PARAMETER(logsigma_u);
-
+  
   Type sigma_e = exp(logsigma_e);
   Type rho = exp(logrho);
   Type sigma_u = exp(logsigma_u);
   
   // Parameter vector for spatial field
   PARAMETER_VECTOR(u_tilde);
-
-// For PC priors
+  
+  // For PC priors
   Type lambda_rho_inv = -rho0 * log(alpha_rho);    // for Exp on rho^{-1}
   Type lambda_sigma_u = -log(alpha_s_u) / s0_u;    // for Exp on sigma_u
   
-
+  
   // ===================================
   //               Priors
   // ===================================
   Type nlp = 0.0;
-  // If you prefer half-Cauchy for sigma_e instead, comment the above two lines and uncomment:
-  nlp -= dcauchy_stable(sigma_e, Type(0.0), cauchy_scale_e, true);
+  nlp -= dcauchy_stable(sigma_e, Type(0.0), Type(5.0), true);
   nlp -= logsigma_e; // Jacobian for log-parameterization
   
   Type rho_inv = Type(1.0) / rho; // = exp(-log_rho)
   nlp -= dweibull(rho_inv, lambda_rho_inv, Type(1.0), true); // log p(X)
-  // nlp += logrho;
   nlp -= logrho;
   
   nlp -= dexp(sigma_u, lambda_sigma_u, true); // subtract log p(sigma_u)
   nlp -= logsigma_u;                         // subtract log jacobian (log|d sigma_u / d log_sigma_u|)
-
+  
   // Derived spatial quantities
   Type kappa = sqrt(8)/rho;
   Type tau   = 1/(kappa*sigma_u);
@@ -123,12 +119,12 @@ Type objective_function<Type>::operator() ()
   SparseMatrix<Type> Q = Q_spde(spde_mat, kappa);
   
   
-
+  
   //=============================================================================================================
   // Objective function is sum of negative log likelihood components
   int n = y.size();	                   // number of observations 
   Type nll_u = 0.0;		                 // likelihood for the spatial effect
-
+  
   nll_u += GMRF(Q)(u_tilde); // u_raw has prior independent of tau
   vector<Type> u = u_tilde / tau; // non-centered transform
   
@@ -144,11 +140,11 @@ Type objective_function<Type>::operator() ()
   }
   Type nll = -log_lik.sum(); // total NLL
   
-
-// Calculate joint negative log likelihood
+  
+  // Calculate joint negative log likelihood
   Type jnll = nll + nll_u + nlp;
   
-
+  
   //============================================
   // Simulated data from the mu
   //============================================
@@ -160,14 +156,14 @@ Type objective_function<Type>::operator() ()
     } 
     REPORT(y_sim);
   }
-
+  
   
   //=============================================
   // Derived quantities
   //=============================================
   // Spatial field in A_obs
   vector<Type> field_sp = A_obs * u;
-
+  
   // REPORT 
   REPORT(sigma_e);
   REPORT(tau);
@@ -179,7 +175,7 @@ Type objective_function<Type>::operator() ()
   REPORT(log_lik);
   REPORT(u);
   REPORT(u_tilde);
-
+  
   
   // ADREPORT
   ADREPORT(field_sp);
@@ -188,6 +184,6 @@ Type objective_function<Type>::operator() ()
   ADREPORT(kappa);
   ADREPORT(u);
   ADREPORT(u_tilde);
-
+  
   return jnll;
 }

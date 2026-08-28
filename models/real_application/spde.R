@@ -21,18 +21,13 @@ dyn.load(dynlib("spde"))
 #=====================================================================
 #                 Mian function: SPDE with TMB
 #=====================================================================
-
-
 run_tmb_spde <- function(sp_data, dim_grid){
 set.seed(1234)
   
   # Convert sp_points to matrix
-  # sp_matrix <- as.matrix(sp_data[, c(1:2)])
-  # mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.25, max.edge = c(1, 1.5)) 
-  # 
   sp_matrix <- as.matrix(sp_data[, c(1:2)])
-  mesh = inla.mesh.2d(loc = sp_matrix, cutoff = 0.3, max.edge = c(1, 1.5)) 
-  
+  mesh = fmesher::fm_mesh_2d_inla(loc = as.matrix(sp_data[, c(1:2)]),
+                                  cutoff = 0.3, max.edge = c(1, 1.5))
   
   #====================================================
   # Grid points
@@ -61,12 +56,10 @@ set.seed(1234)
   tmb_data <- list(y = sqrt(sp_data$y_obs), 
                    A_obs = A_obs, 
                    spde_mat = spde_mat, 
-                   # --- Prior hyperparameters (PC priors) ---
                    rho0      = 50,    # e.g. 50 km reference range
                    alpha_rho = 0.05,  # 5% chance that range < rho0
                    s0_u      = 1.0,   # e.g. 5% chance that sigma_u > 1
-                   alpha_s_u = 0.05,
-                   cauchy_scale_e = 5.0)
+                   alpha_s_u = 0.05)
 
   
   #========================================
@@ -78,6 +71,8 @@ set.seed(1234)
                   u_tilde = rep(0, mesh$n))
   
   obj_spde <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "spde", random = "u_tilde")
+  # lwr <- c(1e-4, 1e-4, 1e-4)  # Avoid exact zero
+  # upr <- c(10, 10, 10)        # Add upper bounds to prevent explosion
   opt_spde = nlminb(obj_spde$par, obj_spde$fn, obj_spde$gr)
   rep_spde <- sdreport(obj_spde)
   
@@ -186,28 +181,21 @@ plot(germany_border$geometry)
 plot(sp_points_germany, add = TRUE, col = "red", pch = 20)
 
 
+
 # ===============================
 # Observation points
 # ===============================
-sp_matrix <- as.matrix(sp_df[, c("x", "y")])
-sp_df <- data.frame(
-  x = sp_matrix[, 1],
-  y = sp_matrix[, 2])
-
-
-mesh <- inla.mesh.2d(loc = sp_matrix, cutoff = 0.3, max.edge = c(1, 1.5))
+sp_matrix <- as.matrix(sp_data[, c("s1", "s2")])
+mesh <- fmesher::fm_mesh_2d_inla(loc = sp_matrix, cutoff = 0.3, max.edge = c(1, 1.5))
 
 # -----------------------
 # Plot mesh over Germany
 # -----------------------
 plot_mesh <- ggplot() +
   geom_fm(data = mesh, linewidth = 0.4) +
-  geom_point(data = sp_df, aes(x = x, y = y), color = "red", size = 1.8) +
-  labs(
-    title = paste("Spatial mesh (n =", mesh$n, "nodes)"),
-    x = "Longitude",
-    y = "Latitude"
-  ) +
+  geom_point(data = data.frame(sp_matrix), aes(x = s1, y = s2), color = "red", size = 1.8) +
+  labs(title = paste("Spatial mesh (n =", mesh$n, "nodes)"), 
+       x = "Longitude", y = "Latitude") +
   theme_bw(base_size = 14) +
   theme(plot.title = element_text(size = 16, hjust = 0.5)) 
 
@@ -216,13 +204,8 @@ plot_mesh
 # ===============================
 # Save as high-quality PDF
 # ===============================
-ggsave(
-  filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot_mesh.pdf",
-  plot = plot_mesh,
-  device = cairo_pdf,
-  width = 6,
-  height = 6,
-  dpi = 300)
+ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot_mesh.pdf",
+       plot = plot_mesh, device = cairo_pdf, width = 6, height = 6, dpi = 300)
 
 
 
@@ -240,6 +223,8 @@ saveRDS(spde_tmb, file='outputs/spde_tmb.RDS')
 #======================================================
 #               Run the MCMC sampling
 #======================================================
+# lwr <- c(1e-4, 1e-4, 1e-4)
+# upr <- c(10, 10, 10)
 
 startTime <- Sys.time()
 spde_mcmc <- tmbstan(spde_tmb[[1]],

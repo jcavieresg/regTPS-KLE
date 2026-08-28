@@ -47,40 +47,38 @@ Type objective_function<Type>::operator() ()
 // DATA
 //====================================================
   DATA_VECTOR(y_obs);
-  DATA_MATRIX(Phi_kle_sp); // The pre-computed KLE basis at observation points
-  DATA_VECTOR(S_diag_truncated); // Eigenvalues of S (truncated)
-  DATA_INTEGER(M_P_null_space); // Number of polynomial modes
-  DATA_SCALAR(sigma_prior_s0);     // s0 for P(sigma > s0) = alpha_s (PC prior)
-  DATA_SCALAR(sigma_prior_alpha);  // alpha_s for sigma PC prior (e.g. 0.05)
-  DATA_SCALAR(logalpha_prior_mean); // prior mean for logalpha (default 0)
-  DATA_SCALAR(logalpha_prior_sd);   // prior sd for logalpha (default 1)
+  DATA_MATRIX(Phi_kle_sp);            // The pre-computed KLE basis at observation points
+  DATA_VECTOR(S_diag_truncated);      // Eigenvalues of S (truncated)
+  DATA_INTEGER(M_P_null_space);       // Number of polynomial modes
+
+  DATA_SCALAR(lambda_sigma_e);     
+  DATA_SCALAR(mean_logalpha);
+  DATA_SCALAR(sigma_logalpha);
   
   
 //====================================================
 // PARAMETERS
 //====================================================
   PARAMETER_VECTOR(z_tilde);
-  PARAMETER(logsigma); // Log of observation noise SD
-  PARAMETER(logalpha); // Log of regularization parameter
+  PARAMETER(logsigma_e); // Log of sigma_e
+  PARAMETER(logalpha);   // Log of regularization parameter
 
   // MODEL SETUP
-  Type sigma = exp(logsigma);
-  Type alpha = exp(logalpha);
+  Type sigma_e = exp(logsigma_e);
+  Type alpha   = exp(logalpha);
   
   //==================================================
   // PRIORS
   //==================================================
   Type nlp = Type(0.0);                                 // negative log prior  (priors)
   
-  // Prior for sigma: PC prior (exponential) on sigma
-  // lambda = -log(alpha_s) / s0  where P(sigma > s0) = alpha_s
-  Type lambda_sigma = -log(sigma_prior_alpha) / sigma_prior_s0;
-  nlp -= dexp(sigma, lambda_sigma, true); // subtract log p(sigma)
-  nlp -= logsigma; // subtract log|d sigma / d logsigma|  (we subtract because nlp is -log prior)
+  // Prior for sigma: PC prior (exponential)
+  nlp -= dexp(sigma_e, lambda_sigma_e, true); // subtract log p(sigma)
+  nlp -= logsigma_e; 
   
   // Prior for alpha: put a Normal prior on logalpha (i.e., log-normal prior on alpha)
-  nlp -= dnorm(logalpha, logalpha_prior_mean, logalpha_prior_sd, true);
-
+  // nlp -= dnorm(logalpha, Type(1.0), lambda_alpha, true);
+  nlp -= dnorm(logalpha, mean_logalpha, sigma_logalpha, true);
   
   
   // Standard normal prior on whitened coefficients
@@ -113,7 +111,7 @@ Type objective_function<Type>::operator() ()
   // FIELD CONSTRUCTION
   //====================================================
   vector<Type> field_sp = Phi_kle_sp * z;
-  // vector<Type> field_grid = Phi_kle_grid * z;
+
 
   //====================================================
   // Likelihood
@@ -124,7 +122,7 @@ Type objective_function<Type>::operator() ()
   vector<Type> log_lik(n);
   
   for(int i = 0; i < n; i++){
-    log_lik(i) = dnorm(y_obs(i), field_sp(i), sigma, true);
+    log_lik(i) = dnorm(y_obs(i), field_sp(i), sigma_e, true);
     nll -= log_lik(i);
   }
   
@@ -139,7 +137,7 @@ Type objective_function<Type>::operator() ()
   vector<Type> y_sim(n);
   SIMULATE {
     for(int i = 0; i < n; i++){
-      Type y_tmp = rnorm(field_sp(i), sigma);  // simulate as usual
+      Type y_tmp = rnorm(field_sp(i), sigma_e);  // simulate as usual
       y_sim(i) = pow(y_tmp, 2);                // then square it
     }
     REPORT(y_sim); // Inside SIMULATE block
@@ -149,7 +147,7 @@ Type objective_function<Type>::operator() ()
 // REPORT
 //===========================
 REPORT(field_sp);
-REPORT(sigma);
+REPORT(sigma_e);
 REPORT(alpha);
 REPORT(z_tilde);
 REPORT(z);
@@ -161,7 +159,7 @@ REPORT(nlp);
 //====================================================
 // ADREPORT for uncertainty quantification
 //====================================================
-ADREPORT(sigma);
+ADREPORT(sigma_e);
 ADREPORT(alpha);
 ADREPORT(z_tilde);
 ADREPORT(z);
