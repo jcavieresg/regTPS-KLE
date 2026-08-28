@@ -84,10 +84,9 @@ Type objective_function<Type>::operator() ()
   
   for(int k = 0; k < M; k++){
     if(k < M_P_null_space){
-      // CRITICAL FIX: Null space should be UNPENALIZED
       scale(k) = Type(1.0);  // No smoothing for polynomial trend
     } else {
-      // Penalized components: λ_k = 1/(1 + α v_k)
+      // Penalized components: \lambda_k = 1/(1 + α v_k)
       scale(k) = Type(1.0) / sqrt(Type(1.0) + alpha * S_diag_truncated(k) + Type(1e-10));
     }
   }
