@@ -1,6 +1,4 @@
 rm(list = ls())
-setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application")
-
 
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
@@ -201,19 +199,10 @@ plot_mesh <- ggplot() +
 
 plot_mesh
 
-# ===============================
-# Save as high-quality PDF
-# ===============================
-ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot_mesh.pdf",
-       plot = plot_mesh, device = cairo_pdf, width = 6, height = 6, dpi = 300)
-
-
-
 
 #======================================================
 #               Running the SPDE
 #======================================================
-
 spde_tmb <- run_tmb_spde(sp_data, dim_grid = 100)
 spde_tmb$mesh$n
 
@@ -223,9 +212,6 @@ saveRDS(spde_tmb, file='outputs/spde_tmb.RDS')
 #======================================================
 #               Run the MCMC sampling
 #======================================================
-# lwr <- c(1e-4, 1e-4, 1e-4)
-# upr <- c(10, 10, 10)
-
 startTime <- Sys.time()
 spde_mcmc <- tmbstan(spde_tmb[[1]],
                            chains= 3, open_progress = FALSE,
