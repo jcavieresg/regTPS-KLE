@@ -1,5 +1,4 @@
 rm(list = ls())
-setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application")
 
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
@@ -103,11 +102,6 @@ regTPS_KLE <- function(sp_data, dim_grid, n_basis_app = 0.95,
   
   M_P_null_space <- sm$null.space.dim
   
-  cat("  Null space dimension:", M_P_null_space, "\n")
-  cat("  Total basis functions:", length(S_diag), "\n")
-  cat("  Non-zero eigenvalues:", sum(S_diag > 1e-10), "\n")
-  
-
   #====================================
   # VARIANCE-BASED TRUNCATION
   #====================================
@@ -115,22 +109,13 @@ regTPS_KLE <- function(sp_data, dim_grid, n_basis_app = 0.95,
   if (length(nonzero_eigs) == 0) stop("No non-zero eigenvalues found.")
   
   alpha_ref_scaled <- alpha_ref / median(nonzero_eigs)
-  
-  cat("  Reference alpha (raw):", alpha_ref,
-      " | median(v_k):", round(median(nonzero_eigs), 4),
-      " | effective alpha used:", round(alpha_ref_scaled, 6), "\n")
-  
   lambda_k <- 1 / (1 + alpha_ref_scaled * S_diag)
-  
   # Null-space components are unpenalized
   lambda_k[1:M_P_null_space] <- 1
-  
   # Total prior variance
   total_variance <- sum(lambda_k)
-  
   # Cumulative variance explained
   cumvar <- cumsum(lambda_k) / total_variance
-  
   # Smallest M explaining the requested variance
   M_truncation <- which(cumvar >= variance_threshold)[1]
   
@@ -138,10 +123,8 @@ regTPS_KLE <- function(sp_data, dim_grid, n_basis_app = 0.95,
     M_truncation <- length(S_diag)
   }
   
-  cat("  Initial M_truncation (", variance_threshold*100, "% variance):", M_truncation,"\n")
-  
   #----------------------------------------
-  # Safety checks
+  # Checks
   #----------------------------------------
   M_truncation <- max(M_truncation, M_P_null_space + 5)
   # M_truncation <- min(M_truncation, k_basis, n_nodes)
@@ -152,9 +135,6 @@ regTPS_KLE <- function(sp_data, dim_grid, n_basis_app = 0.95,
   }
   
   var_explained <- sum(lambda_k[1:M_truncation]) / total_variance
-  
-  cat("  Final M_truncation:", M_truncation, "\n")
-  cat("  Variance explained:", round(100*var_explained,2), "%\n")
   
   #------------------------------------
   # CREATE TRUNCATED MATRICES
@@ -181,10 +161,7 @@ regTPS_KLE <- function(sp_data, dim_grid, n_basis_app = 0.95,
   # Initial value
   logalpha_init <- log(alpha_ref_scaled)
   
-  cat("  Initial sigma_e:", round(exp(logsigma_e_init), 4), "\n")
-  cat("  Initial alpha:",   round(exp(logalpha_init), 4), "\n\n")
-  
-  #====================================================
+   #====================================================
   # TMB DATA
   #====================================================
   
@@ -210,9 +187,6 @@ regTPS_KLE <- function(sp_data, dim_grid, n_basis_app = 0.95,
   #====================================================
   # FIT MODEL
   #====================================================
-  
-  cat("  Fitting TMB model...\n")
-  
   obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "regTPS_KLE", random = "z_tilde")
   
   opt <- nlminb(obj$par, obj$fn, obj$gr, control = list(eval.max = 1000, iter.max = 500))
@@ -371,8 +345,6 @@ regTPS_KLE_tmb <- regTPS_KLE(sp_data = sp_data,
 
 saveRDS(regTPS_KLE_tmb, file='outputs/regTPS_KLE_tmb.RDS')
 
-# diag <- check_model_diagnostics(regTPS_KLE_tmb, sp_data)
-# plot_diagnostics(diag, sp_data)
 
 
 #======================================================
@@ -393,451 +365,3 @@ print(timeUsed)
 saveRDS(regTPS_KLE_mcmc, file='outputs/regTPS_KLE_mcmc.RDS')
 
 
-
-
-# ============================================================
-# 1. Prepare data
-# ============================================================
-y_sqrt <- sqrt(sp_data$y_obs)
-hist(y_sqrt)
-coords <- as.matrix(sp_data[, c("s1", "s2")])
-
-# Same prediction grid as regTPS-KLE
-grid_total  <- regTPS_KLE_tmb$grid_total
-grid_matrix <- as.matrix(grid_total)
-
-
-# ============================================================
-# 2. Starting values and priors
-# ============================================================
-sigma_sq_start <- var(y_sqrt) * 0.8
-tau_sq_start   <- var(y_sqrt) * 0.2
-
-phi_start <- 3 / (0.3 * diff(range(coords[, 1])))
-
-starting <- list(phi = phi_start, sigma.sq = sigma_sq_start, tau.sq   = tau_sq_start, nu = 1.0)
-tuning <- list(phi = 0.5, sigma.sq = 0.5, tau.sq = 0.5, nu = 1.00)
-
-priors <- list(phi.Unif = c(3 / (2 * diff(range(coords[, 1]))), 3 / (0.01 * diff(range(coords[, 1])))),
-               sigma.sq.IG = c(2, sigma_sq_start),
-               tau.sq.IG   = c(2, tau_sq_start),
-               nu.Unif     = c(0.1, 2.0))
-
-
-# ============================================================
-# 3. Fit 3 independent chains
-# ============================================================
-n_chains  <- 3
-n_samples <- 3000
-
-spnngp_fits <- vector("list", n_chains)
-spnngp_times <- numeric(n_chains)
-
-for (chain in seq_len(n_chains)) {
-  
-  cat("\n========================================\n")
-  cat("Running spNNGP chain", chain, "of", n_chains, "\n")
-  cat("========================================\n")
-  
-  set.seed(1000 + chain)
-  t0 <- Sys.time()
-  spnngp_fits[[chain]] <- spNNGP(
-    y_sqrt ~ 1,
-    coords        = coords,
-    method        = "latent",
-    family        = "gaussian",
-    n.neighbors   = 15,
-    starting      = starting,
-    tuning        = tuning,
-    priors        = priors,
-    cov.model     = "matern",
-    n.samples     = n_samples,
-    n.omp.threads = no_cores,
-    n.report      = 500)
-  t1 <- Sys.time()
-  spnngp_times[chain] <- as.numeric(difftime(t1, t0, units = "min"))
-  cat("Chain", chain, "fit time (min):", round(spnngp_times[chain], 2), "\n")
-}
-
-
-cat("\nTotal spNNGP fitting time (min):", round(sum(spnngp_times), 2), "\n")
-cat("Mean chain fitting time (min):", round(mean(spnngp_times), 2), "\n")
-
-
-# ============================================================
-# burn_in = 1000 per chain before computing pointwise log-lik,
-# ============================================================
-
-compute_spnngp_loglik <- function(spnngp_fit, X, y, burn_in = 0) {
-  
-  w_samples     <- spnngp_fit$p.w.samples
-  beta_samples  <- spnngp_fit$p.beta.samples
-  theta_samples <- spnngp_fit$p.theta.samples
-  
-  n_draws_total <- ncol(w_samples)
-  keep_idx <- seq.int(from = min(burn_in + 1, n_draws_total), to = n_draws_total)
-  
-  w_samples     <- w_samples[, keep_idx, drop = FALSE]
-  beta_samples  <- beta_samples[keep_idx, , drop = FALSE]
-  theta_samples <- theta_samples[keep_idx, , drop = FALSE]
-  
-  n_draws <- ncol(w_samples)
-  n_obs   <- length(y)
-  
-  tau_sq_col <- grep("^tau\\.sq$|tau\\.sq", colnames(theta_samples))
-  if (length(tau_sq_col) != 1) stop("Could not uniquely identify tau.sq in theta samples.")
-  tau_sq_samples <- theta_samples[, tau_sq_col]
-  
-  log_lik <- matrix(NA_real_, nrow = n_draws, ncol = n_obs)
-  for (d in seq_len(n_draws)) {
-    mu_d <- as.numeric(X %*% beta_samples[d, ]) + w_samples[, d]
-    sigma_d <- sqrt(tau_sq_samples[d])
-    log_lik[d, ] <- dnorm(y, mean = mu_d, sd = sigma_d, log = TRUE)
-  }
-  log_lik
-}
-
-# ============================================================
-# Recompute with burn-in removed, matching your prediction script
-# ============================================================
-
-burn_in <- 700   # same value used in the prediction/mapping script
-
-n_obs <- length(y_sqrt)
-X_full <- matrix(1, nrow = n_obs, ncol = 1)
-log_lik_chains <- vector("list", n_chains)
-
-for (chain in seq_len(n_chains)) {
-  cat("Computing log-likelihood for chain", chain, "(post burn-in)\n")
-  log_lik_chains[[chain]] <- compute_spnngp_loglik(spnngp_fits[[chain]], X = X_full, y = y_sqrt,
-                                                   burn_in = burn_in)
-  cat("  Dimensions:", paste(dim(log_lik_chains[[chain]]), collapse = " x "), "\n")
-}
-
-log_lik_3_matrix <- rbind(log_lik_chains[[1]], log_lik_chains[[2]], log_lik_chains[[3]])
-cat("Total post-burn-in draws used for LOO:", nrow(log_lik_3_matrix), "\n")
-
-# loo_3 <- loo(log_lik_3_matrix, cores = no_cores)
-loo_3 <- loo(log_lik_3_matrix, cores = no_cores, save_psis = TRUE)
-print(loo_3)
-
-# ============================================================
-# Also check Pareto-k diagnostics for ALL THREE models -- strong
-# spatial correlation can stress PSIS-LOO's importance-sampling
-# assumptions; worth confirming none of the three show a
-# disproportionate number of problematic k values.
-# ============================================================
-cat("\nSPDE Pareto-k summary:\n");       print(pareto_k_table(loo_1))
-cat("\nregTPS-KLE Pareto-k summary:\n"); print(pareto_k_table(loo_2))
-cat("\nspNNGP Pareto-k summary:\n");     print(pareto_k_table(loo_3))
-
-cmp <- loo_compare(loo_1, loo_2, loo_3)
-rownames(cmp) <- c("SPDE","regTPS-KLE","spNNGP")[match(rownames(cmp), c("model1","model2","model3"))]
-print(cmp)
-
-
-
-
-
-
-
-
-
-
-#====================================================
-# Conditioning diagnostics for S
-#====================================================
-N_sp <- nrow(sp_data)
-n_basis_app <- 0.95
-k_basis <- floor(n_basis_app * N_sp)
-
-sm <- mgcv::smoothCon(s(s1, s2, k = k_basis, bs = "tp"), 
-                      data = data.frame(sp_data), 
-                      absorb.cons = FALSE)[[1]]
-
-S <- sm$S[[1]]
-S_eig <- eigen(S, symmetric = TRUE)
-eig_raw <- S_eig$values
-
-cat("\n===== S MATRIX DIAGNOSTICS =====\n")
-cat("Dimension of S:", nrow(S), "x", ncol(S), "\n")
-cat("Symmetry error:", max(abs(S - t(S))), "\n")
-cat("Smallest eigenvalues:\n")
-print(head(sort(eig_raw), 10))
-
-cat("Largest eigenvalues:\n")
-print(tail(sort(eig_raw), 10))
-
-
-tol <- 1e-10
-
-positive_eigs <- eig_raw[eig_raw > tol]
-
-condition_S <- max(positive_eigs) / min(positive_eigs)
-
-cat("\nPenalized eigenvalues:", length(positive_eigs), "\n")
-cat("Minimum positive eigenvalue:", min(positive_eigs), "\n")
-cat("Maximum positive eigenvalue:", max(positive_eigs), "\n")
-cat("Condition number of penalized S:", format(condition_S, scientific = TRUE), "\n")
-
-
-S_eig <- eigen(S, symmetric = TRUE)
-evectors <- S_eig$vectors
-
-
-V <- S_eig$vectors
-orthogonality_error <- max(abs(crossprod(V) - diag(ncol(V))))
-
-cat("Eigenvector orthogonality error:", format(orthogonality_error, scientific = TRUE), "\n")
-
-
-M_P_null_space <- sm$null.space.dim
-
-
-zero_tol <- 1e-10
-n_zero_eigenvalues <- sum(abs(eig_raw) <= zero_tol)
-
-cat("mgcv null-space dimension:", sm$null.space.dim, "\n")
-cat("Numerically zero eigenvalues:", n_zero_eigenvalues, "\n")
-
-
-
-sorted_eigs <- sort(abs(eig_raw))
-
-cat("\nFirst 10 absolute eigenvalues:\n")
-print(format(sorted_eigs[1:min(10, length(sorted_eigs))], scientific = TRUE))
-
-
-
-
-library(ggplot2)
-
-eig_df <- data.frame(k = seq_along(eig_raw), eigenvalue = eig_raw)
-
-ggplot(eig_df, aes(x = k, y = eigenvalue)) +
-  geom_point(size = 2) +
-  geom_line() +
-  scale_y_log10() +
-  geom_vline(
-    xintercept = sm$null.space.dim + 0.5,
-    linetype = "dashed"
-  ) +
-  labs(
-    title = "Eigenvalue Spectrum of TPS Penalty Matrix",
-    x = "Eigenvalue index",
-    y = "Penalty eigenvalue (log scale)"
-  ) +
-  theme_bw(base_size = 14)
-
-
-
-
-Phi_basis_sp  <- PredictMat(sm, sp_data)
-M_truncation = regTPS_KLE_tmb$M_truncation
-
-Phi_kle_sp <- Phi_basis_sp %*% evectors[, 1:M_truncation]
-
-
-
-
-Phi_kle <- Phi_basis_sp %*% evectors[, 1:M_truncation]
-
-sv <- svd(Phi_kle, nu = 0, nv = 0)$d
-
-condition_Phi <- max(sv) / min(sv)
-
-cat("\n===== KLE BASIS CONDITIONING =====\n")
-cat("Dimension:", nrow(Phi_kle), "x", ncol(Phi_kle), "\n")
-cat("Largest singular value:", max(sv), "\n")
-cat("Smallest singular value:", min(sv), "\n")
-cat("Condition number:", format(condition_Phi, scientific = TRUE), "\n")
-
-
-
-alpha_test <- exp(as.numeric(regTPS_KLE_tmb$opt$par["logalpha"]))
-
-v <- regTPS_KLE_tmb$S_diag_truncated
-
-scale <- 1 / sqrt(1 + alpha_test * v)
-
-scale[1:regTPS_KLE_tmb$M_P_null_space] <- 1
-
-Phi_eff <- regTPS_KLE_tmb$Phi_kle_sp %*% diag(scale)
-
-sv_eff <- svd(Phi_eff, nu = 0, nv = 0)$d
-
-condition_eff <- max(sv_eff) / min(sv_eff)
-
-cat("\n===== EFFECTIVE DESIGN MATRIX =====\n")
-cat("alpha =", alpha_test, "\n")
-cat("min scale =", min(scale), "\n")
-cat("max scale =", max(scale), "\n")
-cat("condition number =", format(condition_eff, scientific = TRUE), "\n")
-
-
-
-cor_Phi <- cor(Phi_kle)
-max_offdiag_cor <- max(abs(cor_Phi[row(cor_Phi) != col(cor_Phi)]))
-
-cat("Maximum absolute off-diagonal correlation:",max_offdiag_cor, "\n")
-
-
-
-
-#====================================================
-# CONDITIONING DIAGNOSTICS
-#====================================================
-
-eig_raw <- S_eig$values
-V <- S_eig$vectors
-
-cat("\n========================================\n")
-cat("       TPS BASIS CONDITIONING\n")
-cat("========================================\n")
-
-# 1. Symmetry
-sym_error <- max(abs(S - t(S)))
-cat("Symmetry error:", format(sym_error, scientific = TRUE), "\n")
-
-# 2. Eigenvalues
-eig_sorted <- sort(eig_raw)
-
-cat("\nSmallest eigenvalues:\n")
-print(format(head(eig_sorted, 10), scientific = TRUE))
-
-cat("\nLargest eigenvalues:\n")
-print(format(tail(eig_sorted, 10), scientific = TRUE))
-
-# 3. Null space
-tol <- 1e-10
-
-n_zero <- sum(abs(eig_raw) <= tol)
-positive_eigs <- eig_raw[eig_raw > tol]
-
-cat("\nmgcv null-space dimension:", sm$null.space.dim, "\n")
-
-cat("Numerically zero eigenvalues:", n_zero, "\n")
-
-# 4. Penalized condition number
-if(length(positive_eigs) > 0) {
-  cond_S <- max(positive_eigs) / min(positive_eigs)
-  cat("Minimum positive eigenvalue:",
-  format(min(positive_eigs), scientific = TRUE), "\n")
-  
-  cat("Maximum positive eigenvalue:", format(max(positive_eigs), scientific = TRUE), "\n")
-  cat("Condition number of penalized S:", format(cond_S, scientific = TRUE), "\n")
-}
-
-# 5. Eigenvector orthogonality
-orth_error <- max(abs(crossprod(V) - diag(ncol(V))))
-
-cat("\nEigenvector orthogonality error:", format(orth_error, scientific = TRUE), "\n")
-
-# 6. Actual KLE design matrix
-Phi_kle <- Phi_basis_sp %*% V[, 1:M_truncation]
-sv <- svd(Phi_kle, nu = 0, nv = 0)$d
-cond_Phi <- max(sv) / min(sv)
-cat("\nKLE design matrix dimension:", nrow(Phi_kle), "x", ncol(Phi_kle), "\n")
-cat("Smallest singular value:", format(min(sv), scientific = TRUE), "\n")
-cat("Largest singular value:", format(max(sv), scientific = TRUE), "\n")
-cat("Condition number of Phi_KLE:", format(cond_Phi, scientific = TRUE), "\n")
-
-cat("\n========================================\n")
-
-
-
-
-
-
-#====================================================
-# EFFECTIVE KLE BASIS CONDITIONING
-#====================================================
-
-alpha_test <- exp(
-  as.numeric(regTPS_KLE_tmb$opt$par["logalpha"])
-)
-
-v <- regTPS_KLE_tmb$S_diag_truncated
-
-scale_k <- 1 / sqrt(1 + alpha_test * v)
-
-# Null-space components
-scale_k[1:regTPS_KLE_tmb$M_P_null_space] <- 1
-
-Phi_eff <- regTPS_KLE_tmb$Phi_kle_sp %*%
-  diag(scale_k)
-
-sv_eff <- svd(Phi_eff, nu = 0, nv = 0)$d
-
-cond_eff <- max(sv_eff) / min(sv_eff)
-
-cat("\n===== EFFECTIVE KLE BASIS =====\n")
-cat("alpha =", alpha_test, "\n")
-cat("min(scale) =", min(scale_k), "\n")
-cat("max(scale) =", max(scale_k), "\n")
-cat("min singular value =", min(sv_eff), "\n")
-cat("max singular value =", max(sv_eff), "\n")
-cat("condition number =", cond_eff, "\n")
-
-
-
-
-
-S_diag_truncated = regTPS_KLE_tmb$tmb_data$S_diag_truncated
-
-alpha_test <- 11.54412
-
-scale_k <- 1 / sqrt(1 + alpha_test * S_diag_truncated)
-
-scale_df <- data.frame(
-  k = seq_along(scale_k),
-  v_k = S_diag_truncated,
-  lambda_k = scale_k^2,
-  scale = scale_k
-)
-
-print(head(scale_df, 10))
-print(tail(scale_df, 10))
-
-
-
-
-ggplot(scale_df, aes(x = k, y = scale)) +
-  geom_line(linewidth = 1.1) +
-  scale_y_log10() +
-  labs(
-    title = "Effective KLE Scaling",
-    x = "KLE component",
-    y = expression(sqrt(lambda[k]))
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    plot.title = element_text(
-      size = 16, hjust = 0.5, face = "bold"
-    ),
-    panel.grid.minor = element_blank()
-  )
-
-
-
-
-post <- as.matrix(regTPS_KLE_mcmc)
-
-z_cols <- grep("^z_tilde", colnames(post))
-
-z_post <- post[, z_cols, drop = FALSE]
-
-R_z <- cor(z_post)
-
-max_cor <- max(
-  abs(R_z[row(R_z) != col(R_z)])
-)
-
-cat("Maximum absolute posterior correlation:",
-    max_cor, "\n")
-
-
-
-library(bayesplot)
-
-mcmc_pairs(as.array(regTPS_KLE_mcmc), pars = colnames(post)[z_cols[1:min(6, length(z_cols))]])
