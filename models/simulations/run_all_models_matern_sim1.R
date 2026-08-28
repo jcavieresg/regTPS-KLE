@@ -1,4 +1,3 @@
-setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE")
 rm(list = ls())
 
 options(scipen = 999)
@@ -20,8 +19,8 @@ dyn.load(dynlib("spde"))
 
 #==================================
 # Compile the model and load it
-compile("tps_kle.cpp", clean = TRUE)
-dyn.load(dynlib("tps_kle"))
+compile("regTPS_KLE.cpp", clean = TRUE)
+dyn.load(dynlib("regTPS_KLE"))
 
 
 #=====================================================================================
@@ -119,8 +118,6 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   sm <- mgcv::smoothCon(s(s1, s2, k = k_basis, bs = "tp"), data = data_smooth, absorb.cons = FALSE)[[1]]
   
   # Get design matrices
-  # NOTE: grid_total must be defined in the calling environment (as in your
-  # scalability loop) since it is not passed as a function argument here.
   Phi_basis_sp   <- PredictMat(sm, data_smooth)
   Phi_basis_grid <- PredictMat(sm, grid_total)
   
@@ -169,33 +166,21 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   if (length(nonzero_eigs) == 0) stop("No non-zero eigenvalues found.")
   
   alpha_ref_scaled <- alpha_ref / median(nonzero_eigs)
-  
-  cat("  Reference alpha (raw):", alpha_ref,
-      " | median(v_k):", round(median(nonzero_eigs), 4),
-      " | effective alpha used:", round(alpha_ref_scaled, 6), "\n")
-  
   lambda_k <- 1 / (1 + alpha_ref_scaled * S_diag)
-  
   # Null-space components are unpenalized
   lambda_k[1:M_P_null_space] <- 1
-  
   # Total prior variance
   total_variance <- sum(lambda_k)
-  
   # Cumulative variance explained
   cumvar <- cumsum(lambda_k) / total_variance
-  
   # Smallest M explaining the requested variance
   M_truncation <- which(cumvar >= variance_threshold)[1]
-  
   if(is.na(M_truncation)){
     M_truncation <- length(S_diag)
   }
   
-  cat("  Initial M_truncation (", variance_threshold*100, "% variance):", M_truncation,"\n")
-  
   #----------------------------------------
-  # Safety checks
+  # Checks
   #----------------------------------------
   M_truncation <- max(M_truncation, M_P_null_space + 5)
   M_truncation <- min(M_truncation, k_basis, n_nodes)
@@ -206,9 +191,6 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   }
   
   var_explained <- sum(lambda_k[1:M_truncation]) / total_variance
-  
-  cat("  Final M_truncation:", M_truncation, "\n")
-  cat("  Variance explained:", round(100*var_explained,2), "%\n")
   
   #------------------------------------
   # CREATE TRUNCATED MATRICES
@@ -251,7 +233,7 @@ run_tmb_tps <- function(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_tru
   # FIT MODEL
   #====================================
   cat("  Fitting TMB model...\n")
-  obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "tps_kle", random = "z_tilde")
+  obj <- MakeADFun(data = tmb_data, parameters = tmb_par, DLL = "regTPS_KLE", random = "z_tilde")
   opt <- nlminb(obj$par, obj$fn, obj$gr, control = list(eval.max = 1000, iter.max = 500))
   
   if(opt$convergence != 0) {
@@ -363,10 +345,6 @@ for (i in 1:n_scenarios) {
   # Get number of mesh nodes from SPDE
   n_mesh_nodes <- mesh$n
   
-  cat("\n=== Comparison Setup ===\n")
-  cat("N observations:", N_sp, "\n")
-  cat("SPDE mesh nodes:", n_mesh_nodes, "\n")
-  
   #====================================
   # COMPARISON STRATEGY FOR regTPS-KLE
   #====================================
@@ -383,31 +361,13 @@ for (i in 1:n_scenarios) {
   }
   
   # Run TPS model
-  cat("\n--- Running TPS model ---\n")
   obj_tps <- run_tmb_tps(N_sp, dim_grid, sp_points, mesh, y_obs, u_true_sp, u_true_grid, 
                          k_basis = k_basis_max, 
                          Cov_true, 
                          variance_threshold = 0.99, 
                          alpha_ref = 1)
   
-  #====================================
-  # COMPARISON SUMMARY
-  #====================================
-  
-  cat("\n=== Final Comparison ===\n")
-  cat("SPDE:\n")
-  cat("  Basis functions used:", n_mesh_nodes, "\n")
-  cat("  (all mesh nodes)\n")
-  
-  cat("\nTPS:\n")
-  cat("  Available k_basis:", k_basis_max, "\n")
-  cat("  Selected M_truncation:", obj_tps$M_truncation, "\n")
-  cat("  Variance explained:", round(obj_tps$variance_explained * 100, 2), "%\n")
-  
-  cat("\nEfficiency:\n")
-  cat("  TPS uses", obj_tps$M_truncation, "basis functions vs SPDE's", n_mesh_nodes, "\n")
-  cat("  Ratio (TPS/SPDE):", round(obj_tps$M_truncation / n_mesh_nodes, 3), "\n")
-  
+
   if(obj_tps$M_truncation < n_mesh_nodes) {
     reduction_pct <- round((1 - obj_tps$M_truncation / n_mesh_nodes) * 100, 1)
     cat("  TPS achieves", reduction_pct, "% reduction in basis functions\n")
