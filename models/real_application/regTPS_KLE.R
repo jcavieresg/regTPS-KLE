@@ -1,5 +1,4 @@
 rm(list = ls())
-setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application")
 
 library(pacman)
 pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
