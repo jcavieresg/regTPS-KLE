@@ -1,3 +1,11 @@
+#===============================================================================
+# POSTERIOR PREDICTIVE MAPS OF NO2 -- ORIGINAL SCALE
+# SPDE vs regTPS-KLE vs spNNGP
+#
+# The maps show the posterior predictive distribution INCLUDING observation
+# error, transformed back to the original NO2 scale.
+#===============================================================================
+
 setwd("C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs")
 rm(list = ls())
 
@@ -5,21 +13,23 @@ options(scipen = 999)
 
 
 library(pacman)
-pacman::p_load(tidyverse, dplyr, parallel, ggplot2,
+pacman::p_load(tidyverse, dplyr, parallel, ggplot2, viridis,
                TMB, tmbstan, mgcv, MASS, INLA, rstan, Matrix, fields, sf,
-               rnaturalearth, gridExtra)
+               rnaturalearth, gridExtra, spNNGP)
 
 # Calculate the number of cores
 no_cores <- parallelly::availableCores() - 1  
 
-# Reading the outputs
-# TMB models
+# Reading TMB models
 spde_tmb <- readRDS('spde_tmb.RDS')
 regTPS_KLE_tmb <- readRDS('regTPS_KLE_tmb.RDS')
 
-# MCMC models (Stan)
+# Reading MCMC models (Stan)
 spde_mcmc <- readRDS('spde_mcmc.RDS')
 regTPS_KLE_mcmc <- readRDS('regTPS_KLE_mcmc.RDS')
+
+# Reading MCMC spNNGP
+spnngp_fits <- readRDS('spnngp_fits.RDS')
 
 
 #=================================================
@@ -88,9 +98,6 @@ summary(sp_data$y_obs)
 #===================================
 # Get Germany border (WGS84)
 #-----------------------------------
-library(sf)
-library(rnaturalearth)
-
 germany_border <- ne_countries(country = "Germany", returnclass = "sf")
 
 #==================================================
@@ -119,659 +126,912 @@ sp_data <- data.frame("s1"= sp_points_germany_df$lon,
                       "s2"= sp_points_germany_df$lat,
                       "y_obs" = sp_points_germany_df$y_obs)
 
+# Check
+plot(germany_border$geometry)
+plot(sp_points_germany, add = TRUE, col = "red", pch = 20)
 
 
+#===============================================================================
+# COMMON PREDICTION GRID
+#===============================================================================
+grid_total  <- regTPS_KLE_tmb$grid_total
+grid_matrix <- as.matrix(grid_total)
+n_grid <- nrow(grid_matrix)
+coords_df <- data.frame(s1 = sp_data$s1, s2 = sp_data$s2)
 
-#===================================================
-# Extract posterior for SPDE (NON-CENTERED)
-#===================================================
-extract_spde_posterior <- function(mcmc_fit, A_grid) {
-  # Extract MCMC samples
-  post <- rstan::extract(mcmc_fit)
-  
-  u_tilde_draws <- post$u_tilde    # iter x n_mesh (whitened)
-  rho_draws     <- exp(post$logrho)
-  sigma_u_draws <- exp(post$logsigma_u)
-  
-  n_iter <- nrow(u_tilde_draws)
-  n_grid <- nrow(A_grid)
-  
-  # Storage
-  field_mean <- numeric(n_grid)
-  field_samples <- matrix(0, n_iter, n_grid)
-  
-  # Transform for each iteration
-  for (iter in 1:n_iter) {
-    # NON-CENTERED TRANSFORMATION: u = u_tilde / tau
-    kappa_iter <- sqrt(8) / rho_draws[iter]
-    tau_iter   <- 1.0 / (kappa_iter * sigma_u_draws[iter])
-    
-    # Transform to centered field
-    u_iter <- u_tilde_draws[iter, ] / tau_iter
-    
-    # Project to grid
-    field_iter <- as.vector(A_grid %*% u_iter)
-    
-    # Store
-    field_samples[iter, ] <- field_iter
-    field_mean <- field_mean + field_iter
-  }
-  
-  field_mean <- field_mean / n_iter
-  
-  # Compute quantiles for uncertainty
-  field_lower <- apply(field_samples, 2, quantile, probs = 0.025)
-  field_upper <- apply(field_samples, 2, quantile, probs = 0.975)
-  field_sd    <- apply(field_samples, 2, sd)
-  
-  return(list(
-    mean = field_mean,
-    samples = field_samples,
-    lower = field_lower,
-    upper = field_upper,
-    sd = field_sd
-  ))
+
+#===============================================================================
+# SPDE -- POSTERIOR PREDICTIVE DRAWS
+#===============================================================================
+#
+# Model:
+#
+#   y(s) = A(s)u + epsilon
+#   epsilon ~ N(0, sigma_e^2)
+#
+# We reconstruct the latent field at the prediction grid and then add
+# posterior observation error.
+#
+# Finally:
+#
+#   NO2 = y_sqrt^2
+#
+#===============================================================================
+
+cat("\n========================================\n")
+cat("SPDE posterior predictive distribution\n")
+cat("========================================\n")
+
+post_spde <- rstan::extract(spde_mcmc)
+
+cat("SPDE parameters:\n")
+print(names(post_spde))
+
+
+#---------------------------------------
+# Extract latent spatial coefficients
+#---------------------------------------
+t0_pred_spde <- Sys.time()
+u_tilde_post <- post_spde$u_tilde
+if (is.null(u_tilde_post)) {
+  stop("Could not find 'u_tilde' in the SPDE posterior.")
 }
 
-#===================================================
-# Extract posterior for regTPS-KLE (NON-CENTERED)
-#===================================================
-extract_tps_posterior <- function(mcmc_fit, Phi_kle_grid, 
-                                  S_diag_truncated, M_P_null_space) {
-  # Extract MCMC samples
-  post <- rstan::extract(mcmc_fit)
+niter_spde <- nrow(u_tilde_post)
+n_nodes_spde <- ncol(u_tilde_post)
+
+cat("Number of SPDE posterior draws:", niter_spde, "\n")
+cat("Number of SPDE nodes:", n_nodes_spde, "\n")
+
+
+#---------------------------------------
+# Extract rho and sigma_u
+#---------------------------------------
+
+if ("rho" %in% names(post_spde) &&
+    "sigma_u" %in% names(post_spde)) {
   
-  z_tilde_draws <- post$z_tilde      # iter x M (whitened)
-  alpha_draws   <- exp(post$logalpha)
+  rho_post <- post_spde$rho
+  sigma_u_post <- post_spde$sigma_u
   
-  n_iter <- nrow(z_tilde_draws)
-  M      <- ncol(z_tilde_draws)
-  n_grid <- nrow(Phi_kle_grid)
+} else if ("logrange" %in% names(post_spde) &&
+           "logsigma_u" %in% names(post_spde)) {
   
-  # Storage
-  field_mean <- numeric(n_grid)
-  field_samples <- matrix(0, n_iter, n_grid)
+  rho_post <- exp(post_spde$logrange)
+  sigma_u_post <- exp(post_spde$logsigma_u)
   
-  # Transform for each iteration
-  for (iter in 1:n_iter) {
-    alpha_iter <- alpha_draws[iter]
-    
-    # NON-CENTERED TRANSFORMATION: Z = scale * z_tilde
-    z_iter <- numeric(M)
-    
-    # Null space (unpenalized)
-    if (M_P_null_space > 0) {
-      z_iter[1:M_P_null_space] <- z_tilde_draws[iter, 1:M_P_null_space]
-    }
-    
-    # Penalized components
-    if (M > M_P_null_space) {
-      idx_penalized <- (M_P_null_space + 1):M
-      S_k <- S_diag_truncated[idx_penalized]
-      
-      scale_factor <- 1.0 / sqrt(1.0 + alpha_iter * S_k + 1e-10)
-      z_iter[idx_penalized] <- z_tilde_draws[iter, idx_penalized] * scale_factor
-    }
-    
-    # Project to grid
-    field_iter <- as.vector(Phi_kle_grid %*% z_iter)
-    
-    # Store
-    field_samples[iter, ] <- field_iter
-    field_mean <- field_mean + field_iter
-  }
+} else if ("logrho" %in% names(post_spde) &&
+           "logsigma_u" %in% names(post_spde)) {
   
-  field_mean <- field_mean / n_iter
+  rho_post <- exp(post_spde$logrho)
+  sigma_u_post <- exp(post_spde$logsigma_u)
   
-  # Compute quantiles for uncertainty
-  field_lower <- apply(field_samples, 2, quantile, probs = 0.025)
-  field_upper <- apply(field_samples, 2, quantile, probs = 0.975)
-  field_sd    <- apply(field_samples, 2, sd)
-  
-  return(list(
-    mean = field_mean,
-    samples = field_samples,
-    lower = field_lower,
-    upper = field_upper,
-    sd = field_sd
-  ))
-}
-
-#===================================================
-# Apply extraction functions
-#===================================================
-spde_posterior <- extract_spde_posterior(
-  mcmc_fit = spde_mcmc,
-  A_grid   = spde_tmb$A_grid)
-
-tps_posterior <- extract_tps_posterior(
-  mcmc_fit         = regTPS_KLE_mcmc,
-  Phi_kle_grid     = regTPS_KLE_tmb$Phi_kle_grid,
-  S_diag_truncated = regTPS_KLE_tmb$S_diag_truncated,
-  M_P_null_space   = regTPS_KLE_tmb$M_P_null_space)
-
-
-#========================================================
-# Build data frame for plotting
-#========================================================
-grid_total <- regTPS_KLE_tmb$grid_total
-
-df_grid <- grid_total %>%
-  mutate(mean = spde_posterior$mean,
-         q025 = spde_posterior$lower,
-         median = median(spde_posterior$samples),
-         q975 = spde_posterior$upper)
-
-#========================================================
-# Plot with ggplot2
-#========================================================
-plot1 <- ggplot() +
-  geom_raster(data = df_grid, aes(x = s1, y = s2, fill = mean)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "magma") +
-  coord_sf() +
-  labs(title = "Predicted response surface (mean)",
-       fill = "Mean") +
-  theme_minimal()
-
-
-
-
-#========================================================
-# Build data frame for plotting
-#========================================================
-grid_total <- regTPS_KLE_tmb$grid_total
-
-df_grid2 <- grid_total %>%
-  mutate(mean = tps_posterior$mean,
-         q025 = tps_posterior$lower,
-         median = median(tps_posterior$samples),
-         q975 = tps_posterior$upper)
-
-#========================================================
-# Plot with ggplot2
-#========================================================
-plot2 <- ggplot() +
-  geom_raster(data = df_grid2, aes(x = s1, y = s2, fill = mean)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "magma") +
-  coord_sf() +
-  labs(title = "Predicted response surface (mean)",
-       fill = "Mean") +
-  theme_minimal()
-
-
-
-library(gridExtra)
-grid.arrange(plot1, plot2, ncol = 1)
-
-
-
-
-
-
-
-
-
-
-#========================================================
-# 1. Extract posterior samples 
-#========================================================
-u_tilde_post      <- rstan::extract(spde_mcmc)$u_tilde        # iterations × n_nodes
-logrho_post     <- rstan::extract(spde_mcmc)$logrho       # iterations
-logsigma_u_post <- rstan::extract(spde_mcmc)$logsigma_u   # iterations
-
-niter     <- nrow(u_tilde_post)
-n_nodes   <- ncol(u_tilde_post)
-A_grid    <- spde_tmb$A_grid   # sparse projection matrix mesh -> grid
-
-# Convert to dense for matrix multiply
-A_grid_dense <- as.matrix(A_grid)
-
-cat("dim(A_grid):", dim(A_grid), "\n")
-cat("n_nodes:", n_nodes, "\n")
-
-# Number of grid points
-n_grid <- nrow(A_grid_dense)
-
-# Storage for grid predictions
-y_grid_samples <- matrix(NA_real_, nrow = niter, ncol = n_grid)
-
-#========================================================
-# 2. Loop over iterations and reconstruct centred u
-#========================================================
-for(it in seq_len(niter)){
-  
-  u_tilde_it <- u_tilde_post[it, ]
-  
-  # reconstruct tau
-  rho_it     <- exp(logrho_post[it])
-  sigma_u_it <- exp(logsigma_u_post[it])
-  kappa_it   <- sqrt(8) / rho_it
-  tau_it     <- 1 / (kappa_it * sigma_u_it)
-  
-  # non-centered -> centred
-  u_it <- u_tilde_it / tau_it
-  
-  # project to grid: (n_grid × n_nodes) %*% (n_nodes) -> (n_grid)
-  y_grid_samples[it, ] <- as.numeric(A_grid_dense %*% u_it)
-}
-
-y_grid_samples_spde <- y_grid_samples
-
-
-#========================================================
-# 3. Summaries for each grid point
-#========================================================
-y_summary <- apply(y_grid_samples_spde, 2, quantile, probs = c(0.025, 0.5, 0.975))
-y_summary <- t(y_summary)  # grid_points × 3
-colnames(y_summary) <- c("q025", "median", "q975")
-
-#========================================================
-# 4. Attach to your spatial dataframe
-#========================================================
-df_spde <- data.frame(regTPS_KLE_tmb$grid_total[, 1],
-                      regTPS_KLE_tmb$grid_total[, 2],
-                      y_summary[, "q025"], y_summary[, "median"], y_summary[, "q975"])
-colnames(df_spde) <- c("s1", "s2",  "q025", "median", "q975")
-
-
-#========================================================
-# 5. Plot with ggplot2
-#========================================================
-library(ggplot2)
-
-# Example: plot posterior median field
-coords <- data.frame(sp_data[, c(1, 2)])
-head(coords)
-
-
-plot1 <- ggplot(df_spde) +
-  geom_raster(aes(x = s1, y = s2, fill = median^2)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C") +
-  geom_point(data = coords, aes(x = s1, y = s2), 
-             color = "white", shape = 1, size = 1.5, alpha = 0.7) +  # <- new layer
-  # scale_fill_viridis_c() +
-  coord_sf() +
-  labs(title = "Posterior Median GRF") +
-  theme_minimal()
-
-
-
-
-
-
-
-post <- rstan::extract(regTPS_KLE_mcmc)
-names(post)    # diagnostic: see which variables are present
-
-# -------------------------------------------------------
-# 1) find available posterior arrays
-# -------------------------------------------------------
-has_z_tilde <- "z_tilde" %in% names(post)
-has_z     <- "z" %in% names(post)
-has_logalpha <- "logalpha" %in% names(post)
-has_alpha <- "alpha" %in% names(post)
-
-if(! (has_z_tilde || has_z) ) stop("Posterior contains neither 'z_tilde' nor 'z'. Available: ", paste(names(post), collapse=", "))
-if(!(has_logalpha || has_alpha)) stop("Posterior does not contain 'logalpha' or 'alpha' required to reconstruct z from z_tilde.")
-
-# pick the right variables
-if(has_z_tilde){
-  z_tilde_post <- post$z_tilde      # iterations x M_trunc
-  cat("Using z_tilde from posterior.\n")
 } else {
-  z_post_direct <- post$z       # iterations x M_trunc
-  cat("Using z (directly) from posterior.\n")
+  
+  stop(
+    "Could not identify rho/sigma_u parameterization in SPDE posterior.\n",
+    "Available parameters:\n",
+    paste(names(post_spde), collapse = ", ")
+  )
 }
 
-if(has_logalpha){
-  logalpha_post <- post$logalpha
-  alpha_post <- exp(logalpha_post)
+
+#---------------------------------------
+# Extract observation error sigma_e
+#---------------------------------------
+if ("sigma_e" %in% names(post_spde)) {
+  sigma_e_spde <- post_spde$sigma_e
+  
+} else if ("logsigma_e" %in% names(post_spde)) {
+  
+  sigma_e_spde <- exp(post_spde$logsigma_e)
+  
+} else if ("sigma" %in% names(post_spde)) {
+  
+  sigma_e_spde <- post_spde$sigma
+  
+} else if ("logsigma" %in% names(post_spde)) {
+  
+  sigma_e_spde <- exp(post_spde$logsigma)
+  
 } else {
-  alpha_post <- post$alpha      # already alpha
-  logalpha_post <- log(alpha_post)
+  
+  stop(
+    "Could not identify observation-error parameter in SPDE posterior.\n",
+    "Available parameters:\n",
+    paste(names(post_spde), collapse = ", ")
+  )
 }
 
-# Dimensions
-if(exists("z_tilde_post")){
-  niter <- nrow(z_tilde_post)
+
+#---------------------------------------
+# SPDE prediction matrix
+#---------------------------------------
+A_grid <- as.matrix(spde_tmb$A_grid)
+if (ncol(A_grid) != n_nodes_spde) {
+  stop("A_grid has ", ncol(A_grid), " columns but u_tilde has ", n_nodes_spde, " spatial coefficients.")
+}
+
+
+#---------------------------------------
+# Storage
+#---------------------------------------
+y_pred_spde_sqrt <- matrix(NA_real_, nrow = niter_spde, ncol = n_grid)
+
+
+#---------------------------------------
+# Generate posterior predictive draws
+#---------------------------------------
+cat("Generating SPDE posterior predictive draws...\n")
+for (it in seq_len(niter_spde)) {
+  # SPDE parameterization
+  kappa_it <- sqrt(8) / rho_post[it]
+  # Depending on your SPDE parameterization:
+  tau_it <- 1 / (kappa_it * sigma_u_post[it])
+  # Recover spatial field
+  u_it <- u_tilde_post[it, ] / tau_it
+  # Latent field at prediction locations
+  mu_it <- as.numeric(A_grid %*% u_it)
+  
+  # Add observation error
+  y_pred_spde_sqrt[it, ] <- rnorm(n_grid, mean = mu_it, sd = sigma_e_spde[it])
+}
+
+
+#---------------------------------------
+# Transform to original NO2 scale
+#---------------------------------------
+NO2_pred_spde <- y_pred_spde_sqrt^2
+
+
+#---------------------------------------
+# Posterior predictive summaries
+#---------------------------------------
+spde_summary <- t(apply(NO2_pred_spde, 2, quantile, probs = c(0.025, 0.50, 0.975), na.rm = TRUE))
+
+colnames(spde_summary) <- c("q025", "median", "q975")
+
+df_spde_pred <- data.frame(s1 = grid_total$s1, s2 = grid_total$s2,
+                           q025 = spde_summary[, "q025"],
+                           median = spde_summary[, "median"],
+                           q975 = spde_summary[, "q975"])
+t1_pred_spde <- Sys.time()
+
+
+
+prediction_time_spde_min <- as.numeric(difftime(t1_pred_spde, t0_pred_spde, units = "min"))
+cat("SPDE prediction time (min):", round(prediction_time_spde_min, 4), "\n")
+
+
+#===============================================================================
+# 2. regTPS-KLE -- POSTERIOR PREDICTIVE DRAWS
+#===============================================================================
+#
+# Model:
+#
+#   y(s) = Phi(s) z + epsilon
+#
+# where
+#
+#   z_k = sqrt(lambda_k) z_tilde_k
+#
+# and
+#
+#   lambda_k = 1 / (1 + alpha v_k)
+#
+# We reconstruct the latent field, add sigma_e observation error, and then
+# transform back to the original NO2 scale.
+#
+#===============================================================================
+cat("\n========================================\n")
+cat("regTPS-KLE posterior predictive distribution\n")
+cat("========================================\n")
+
+post_tps <- rstan::extract(regTPS_KLE_mcmc)
+cat("regTPS-KLE parameters:\n")
+print(names(post_tps))
+
+
+#---------------------------------------
+# Extract z_tilde or z
+#---------------------------------------
+t0_pred_tps <- Sys.time()
+has_z_tilde <- "z_tilde" %in% names(post_tps)
+has_z       <- "z" %in% names(post_tps)
+
+if (!has_z_tilde && !has_z) {
+  stop("Neither z_tilde nor z found in regTPS-KLE posterior.")
+}
+
+if (has_z_tilde) {
+  z_tilde_post <- post_tps$z_tilde
+  niter_tps <- nrow(z_tilde_post)
   M_trunc <- ncol(z_tilde_post)
 } else {
-  niter <- nrow(z_post_direct)
+  z_post_direct <- post_tps$z
+  niter_tps <- nrow(z_post_direct)
   M_trunc <- ncol(z_post_direct)
 }
 
-cat("niter =", niter, "M_trunc =", M_trunc, "\n")
+cat("Number of regTPS-KLE posterior draws:", niter_tps, "\n")
+cat("Number of KLE coefficients:", M_trunc, "\n")
 
-# -------------------------------------------------------
-# 2) Grid basis matrix
-#    Phi_kle_grid: expected either (grid_points x M_trunc) or (M_trunc x grid_points).
-#    We'll detect orientation and pick the correct multiply.
-# -------------------------------------------------------
-Phi_kle_grid <- regTPS_KLE_tmb$Phi_kle_grid
-cat("class(Phi_kle_grid) =", class(Phi_kle_grid), "\n")
-Phi_mat <- as.matrix(Phi_kle_grid)
-dim(Phi_mat)    # print dims
 
-# Determine orientation:
-# If ncol(Phi_mat) == M_trunc -> rows = grid_points, cols = M_trunc (common)
-# If nrow(Phi_mat) == M_trunc -> rows = M_trunc, cols = grid_points (transposed)
-if(ncol(Phi_mat) == M_trunc){
-  Phi_rows_are_grid <- TRUE
-  n_grid <- nrow(Phi_mat)
-  cat("Phi_kle_grid assumed: rows = grid points (", n_grid, "), cols = M_trunc (", M_trunc, ")\n")
-} else if(nrow(Phi_mat) == M_trunc){
-  Phi_rows_are_grid <- FALSE
-  n_grid <- ncol(Phi_mat)
-  cat("Phi_kle_grid assumed: rows = M_trunc, cols = grid points (", n_grid, ")\n")
+#---------------------------------------
+# Extract alpha
+#---------------------------------------
+if ("alpha" %in% names(post_tps)) {
+  
+  alpha_post <- post_tps$alpha
+  
+} else if ("logalpha" %in% names(post_tps)) {
+  
+  alpha_post <- exp(post_tps$logalpha)
+  
 } else {
-  stop("Phi_kle_grid has incompatible dimensions vs M_trunc.")
+  
+  stop("Could not find alpha or logalpha in regTPS-KLE posterior.")
 }
 
-# Prepare storage
-y_grid_samples <- matrix(NA_real_, nrow = niter, ncol = n_grid)
 
-# -------------------------------------------------------
-# 3) If needed, reconstruct z from z_tilde and alpha for each iteration
-# -------------------------------------------------------
-# Precompute S_diag_truncated vector (length M_trunc)
+#---------------------------------------
+# Extract sigma_e
+#---------------------------------------
+if ("sigma_e" %in% names(post_tps)) {
+  
+  sigma_e_tps <- post_tps$sigma_e
+  
+} else if ("logsigma_e" %in% names(post_tps)) {
+  
+  sigma_e_tps <- exp(post_tps$logsigma_e)
+  
+} else {
+  
+  stop("Could not identify sigma_e in regTPS-KLE posterior.\n", "Available parameters:\n",
+    paste(names(post_tps), collapse = ", "))
+}
+
+
+#---------------------------------------
+# Basis and penalty eigenvalues
+#---------------------------------------
+Phi_grid <- as.matrix(regTPS_KLE_tmb$Phi_kle_grid)
 S_vec <- regTPS_KLE_tmb$tmb_data$S_diag_truncated
 M_P_null_space <- regTPS_KLE_tmb$tmb_data$M_P_null_space
 
-if(length(S_vec) != M_trunc) stop("Length of S_diag_truncated (", length(S_vec),
-                                  ") does not equal M_trunc (", M_trunc, ").")
 
-# Loop
-for(it in seq_len(niter)){
-  if(exists("z_tilde_post")){
-    z_tilde_it <- z_tilde_post[it, ]       # length M_trunc
-    alpha_it <- alpha_post[it]         # scalar
+# Check dimensions
+if (ncol(Phi_grid) != M_trunc) {
+  stop("Phi_kle_grid has ", ncol(Phi_grid), " columns but posterior has ", M_trunc, " KLE coefficients.")
+}
+
+
+#---------------------------------------
+# Storage
+#---------------------------------------
+y_pred_tps_sqrt <- matrix(NA_real_, nrow = niter_tps, ncol = n_grid)
+#---------------------------------------
+# Generate posterior predictive draws
+#---------------------------------------
+cat("Generating regTPS-KLE posterior predictive draws...\n")
+for (it in seq_len(niter_tps)) {
+  
+  #------------------------------------------------
+  # Recover z from whitened z_tilde
+  #------------------------------------------------
+  
+  if (has_z_tilde) {
     
-    # build prior scaling vector: prior_sd_k = sqrt(1 / (1 + alpha * S_k))
+    z_tilde_it <- z_tilde_post[it, ]
+    alpha_it   <- alpha_post[it]
+    
     prior_sd <- rep(1, M_trunc)
-    if(M_P_null_space < M_trunc){
-      k_idx <- (M_P_null_space + 1):M_trunc   # R 1-based
-      prior_sd[k_idx] <- sqrt( 1 / (1 + alpha_it * S_vec[k_idx]) )
+    
+    if (M_P_null_space < M_trunc) {
+      
+      k_idx <- (M_P_null_space + 1):M_trunc
+      
+      prior_sd[k_idx] <-
+        sqrt(
+          1 /
+            (1 + alpha_it * S_vec[k_idx])
+        )
     }
+    
     z_it <- prior_sd * z_tilde_it
+    
   } else {
-    # we already have z directly
+    
     z_it <- z_post_direct[it, ]
   }
   
-  # project z_it onto grid
-  # z_it is 1 x M_trunc
-  if(Phi_rows_are_grid){
-    # Phi_mat: n_grid x M_trunc -> (n_grid x M_trunc) %*% (M_trunc) -> n_grid
-    y_grid_samples[it, ] <- as.numeric(Phi_mat %*% z_it)
-  } else {
-    # Phi_mat: M_trunc x n_grid -> take transpose to get n_grid x M_trunc
-    y_grid_samples[it, ] <- as.numeric(t(Phi_mat) %*% z_it)
-  }
-}
-
-y_grid_samples_tps <- y_grid_samples
-
-# -------------------------------------------------------
-# 4) Summaries for each grid point
-# -------------------------------------------------------
-y_summary <- apply(y_grid_samples_tps, 2, quantile, probs = c(0.025, 0.5, 0.975))
-y_summary <- t(y_summary)  # grid_points × 3
-colnames(y_summary) <- c("q025", "median", "q975")
-
-# -------------------------------------------------------
-# 5) Attach to df_spde and plot
-# -------------------------------------------------------
-# Ensure df_spde has exactly n_grid rows in the same order as Phi_kle_grid rows
-if(nrow(df_spde) != n_grid) {
-  warning("Number of rows in df_spde (", nrow(df_spde),
-          ") does not match number of grid points (", n_grid, "). Make sure ordering matches.")
+  
+  #------------------------------------------------
+  # Latent spatial field
+  #------------------------------------------------
+  mu_it <- as.numeric(Phi_grid %*% z_it)
+  
+  #------------------------------------------------
+  # Add observation error
+  #------------------------------------------------
+  y_pred_tps_sqrt[it, ] <- rnorm(n_grid, mean = mu_it, sd = sigma_e_tps[it])
 }
 
 
-df_regTPS_KLE <- data.frame(regTPS_KLE_tmb$grid_total[, 1],
-                      regTPS_KLE_tmb$grid_total[, 2],
-                      y_summary[, "q025"], y_summary[, "median"], y_summary[, "q975"])
-colnames(df_regTPS_KLE) <- c("s1", "s2",  "q025", "median", "q975")
-
-# Quick plot example (median)
-library(ggplot2)
-plot2 <- ggplot(df_regTPS_KLE) +
-  geom_raster(aes(x = s1, y = s2, fill = median^2)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C") +
-  geom_point(data = coords, aes(x = s1, y = s2), 
-             color = "white", shape = 1, size = 1.5, alpha = 0.7) +  #
-  # scale_fill_viridis_c() +
-  coord_sf() +
-  labs(title = "Posterior median of KLE field") +
-  theme_minimal()
+#---------------------------------------
+# Transform to original NO2 scale
+#---------------------------------------
+NO2_pred_tps <- y_pred_tps_sqrt^2
 
 
-library(gridExtra)
-grid.arrange(plot1, plot2, ncol = 1)
+#---------------------------------------
+# Posterior predictive summaries
+#---------------------------------------
+tps_summary <- t(apply(NO2_pred_tps, 2, quantile, probs = c(0.025, 0.50, 0.975), na.rm = TRUE))
+colnames(tps_summary) <- c("q025", "median", "q975")
+
+df_tps_pred <- data.frame(s1 = grid_total$s1, s2 = grid_total$s2, q025 = tps_summary[, "q025"],
+                          median = tps_summary[, "median"],
+                          q975 = tps_summary[, "q975"])
+t1_pred_tps <- Sys.time()
+prediction_time_tps_min <- as.numeric(difftime(t1_pred_tps, t0_pred_tps, units = "min"))
 
 
+cat("regTPS-KLE prediction time (min):", round(prediction_time_tps_min, 4), "\n")
 
-
-
-
-# Find the overall range of the data
-# You may need to load df_spde and df_regTPS_KLE first
-min_value <- min(min(df_spde$median^2), min(df_regTPS_KLE$median^2))
-max_value <- max(max(df_spde$median^2), max(df_regTPS_KLE$median^2))
-
-# Create the first plot with the new limits
-plot1 <- ggplot(df_spde) +
-  geom_raster(aes(x = s1, y = s2, fill = median^2)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.8) +
-  scale_fill_viridis_c(option = "C", limits = c(min_value, max_value)) +
-  # geom_point(data = coords, aes(x = s1, y = s2),
-  #            color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  geom_point(data = coords, aes(x = s1, y = s2),
-             color = "black", size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "Posterior Median GRF") +
-  theme_minimal()
-
-# Create the second plot with the same limits
-plot2 <- ggplot(df_regTPS_KLE) +
-  geom_raster(aes(x = s1, y = s2, fill = median^2)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.8) +
-  scale_fill_viridis_c(option = "C", limits = c(min_value, max_value)) +
-  # geom_point(data = coords, aes(x = s1, y = s2),
-  #            color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  geom_point(data = coords, aes(x = s1, y = s2),
-             color = "black", size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "Posterior median of KLE field") +
-  theme_minimal()
-
-# Arrange the plots
-library(gridExtra)
-grid.arrange(plot1, plot2, ncol = 1)
-
-
-
-
-
-
-
-# Load necessary libraries
-library(ggplot2)
-library(gridExtra)
-library(dplyr)
-
-
-#========================================================
-# 2. Square the quantile values for both dataframes
-#========================================================
-df_spde <- df_spde %>%
-  mutate(across(c(q025, median, q975), ~ .x^2))
-
-df_regTPS_KLE <- df_regTPS_KLE %>%
-  mutate(across(c(q025, median, q975), ~ .x^2))
-
-#========================================================
-# 3. Find overall limits for consistent color scales
+#===============================================================================
+# 3. spNNGP -- POSTERIOR PREDICTIVE DRAWS
+#===============================================================================
 #
-# NOTE: 'germany_border' and 'coords' must be available
-#       in your environment.
-#========================================================
-df_combined <- rbind(df_spde, df_regTPS_KLE)
+# spNNGP's predict(..., p.y.0) gives posterior predictive samples, i.e. samples
+# that include the observation-error component.
+#
+# We use all three independently fitted chains and discard the first 1000
+# iterations of each chain.
 
-q025_limits <- range(df_combined$q025)
-median_limits <- range(df_combined$median)
-q975_limits <- range(df_combined$q975)
+# posterior_predictive_NO2 <- readRDS('posterior_predictive_NO2_three_models.RDS')
 
-#========================================================
-# 4. Plot each quantile for both methods
-#========================================================
 
-# Plotting the 2.5% Quantiles
-plot_q025_spde <- ggplot(df_spde) +
-  geom_raster(aes(x = s1, y = s2, fill = q025)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C", limits = q025_limits) +
-  geom_point(data = coords, aes(x = s1, y = s2), color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "SPDE: Squared 2.5% Quantile") +
-  theme_minimal()
 
-plot_q025_KLE <- ggplot(df_regTPS_KLE) +
-  geom_raster(aes(x = s1, y = s2, fill = q025)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C", limits = q025_limits) +
-  geom_point(data = coords, aes(x = s1, y = s2), color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "KLE: Squared 2.5% Quantile") +
-  theme_minimal()
+#
+#===============================================================================
+cat("\n========================================\n")
+cat("spNNGP posterior predictive distribution\n")
+cat("========================================\n")
 
-# Plotting the Medians
-plot_median_spde <- ggplot(df_spde) +
+
+if (!exists("spnngp_fits")) {
+  stop(
+    "Object 'spnngp_fits' was not found. ",
+    "This should contain your three independently fitted spNNGP chains."
+  )
+}
+
+
+n_chains <- length(spnngp_fits)
+
+burn_in <- 1000
+
+cat("Number of spNNGP chains:", n_chains, "\n")
+cat("Burn-in per chain:", burn_in, "\n")
+
+
+X_pred <- matrix(1, nrow = n_grid, ncol = 1)
+
+
+#---------------------------------------
+# Predict from each chain
+#---------------------------------------
+cat("Generating spNNGP posterior predictive draws...\n")
+
+pred_draws_list <- vector("list", n_chains)
+
+for (chain in seq_len(n_chains)) {
+  
+  cat("  Predicting chain", chain, "of", n_chains, "\n")
+  
+  pred <- predict(spnngp_fits[[chain]], X.0 = X_pred, coords.0 = grid_matrix, n.omp.threads = no_cores)
+  # p.y.0:
+  # grid locations x posterior predictive draws
+  #
+  # It is already on the sqrt(NO2) scale.
+  n_draws_chain <- ncol(pred$p.y.0)
+  
+  keep_idx <- seq.int(from = min(burn_in + 1, n_draws_chain), to = n_draws_chain)
+  pred_draws_list[[chain]] <- pred$p.y.0[, keep_idx, drop = FALSE]
+}
+
+
+#---------------------------------------
+# Combine all chains
+#---------------------------------------
+pred_spnngp_sqrt <- do.call(cbind, pred_draws_list)
+cat("Combined spNNGP predictive draws:", nrow(pred_spnngp_sqrt), "locations x", ncol(pred_spnngp_sqrt), "draws\n")
+
+
+#---------------------------------------
+# Transform to original NO2 scale
+#---------------------------------------
+#
+# p.y.0 is on sqrt(NO2) scale
+#
+NO2_pred_spnngp <- pred_spnngp_sqrt^2
+
+
+#---------------------------------------
+# Posterior predictive summaries
+#---------------------------------------
+spnngp_summary <- t(apply(NO2_pred_spnngp, 1, quantile, probs = c(0.025, 0.50, 0.975), na.rm = TRUE))
+colnames(spnngp_summary) <- c("q025", "median", "q975")
+
+
+df_spnngp_pred <- data.frame(s1 = grid_total$s1, s2 = grid_total$s2, q025 = spnngp_summary[, "q025"],
+                             median = spnngp_summary[, "median"], q975 = spnngp_summary[, "q975"])
+
+
+#===============================================================================
+# 4. CHECK THE THREE DATASETS
+#===============================================================================
+
+cat("\n========================================\n")
+cat("Prediction summary\n")
+cat("========================================\n")
+
+cat("SPDE:\n")
+print(summary(df_spde_pred$median))
+
+cat("\nregTPS-KLE:\n")
+print(summary(df_tps_pred$median))
+
+cat("\nspNNGP:\n")
+print(summary(df_spnngp_pred$median))
+
+
+#===============================================================================
+# 5. COMMON COLOR SCALE
+#===============================================================================
+#
+# Use ALL posterior predictive draws to determine a common range.
+#
+# This guarantees that the colors mean the same NO2 concentration in all maps.
+#
+#===============================================================================
+all_medians <- c(df_spde_pred$median, df_tps_pred$median, df_spnngp_pred$median)
+min_value <- min(all_medians, na.rm = TRUE)
+max_value <- max(all_medians, na.rm = TRUE)
+
+
+#===============================================================================
+# 6. COMMON MAP FUNCTION
+#===============================================================================
+make_prediction_map <- function(df, title, fill_label = expression(NO[2])) {
+  ggplot(df) + geom_raster(aes(x = s1, y = s2, fill = median)) +
+  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.8) +
+  geom_point(data = coords_df, aes(x = s1, y = s2), color = "black", size = 1.5, alpha = 0.7) +
+  scale_fill_viridis_c(option = "C", limits = c(min_value, max_value), name = fill_label) +
+  coord_sf() + labs(title = title, x = NULL, y = NULL) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "right", panel.grid = element_blank())
+}
+
+
+#===============================================================================
+# 7. CREATE THE THREE POSTERIOR PREDICTIVE MAPS
+#===============================================================================
+plot_spde <- make_prediction_map(df_spde_pred, "SPDE")
+plot_tps <- make_prediction_map(df_tps_pred, "regTPS-KLE")
+plot_spnngp <- make_prediction_map(df_spnngp_pred,"spNNGP")
+
+
+#===============================================================================
+# 8. DISPLAY SIDE-BY-SIDE
+#===============================================================================
+grid.arrange(plot_spde, plot_tps, plot_spnngp, ncol = 3)
+
+
+#===============================================================================
+# 9. OPTIONAL: CREATE A SINGLE DATA FRAME FOR FURTHER COMPARISON
+#===============================================================================
+df_all_predictions <- rbind(data.frame(df_spde_pred, model = "SPDE"),
+                            data.frame(df_tps_pred,  model = "regTPS-KLE"),
+                            data.frame(df_spnngp_pred, model = "spNNGP"))
+
+
+#===============================================================================
+# 10. FACET VERSION
+#===============================================================================
+ggplot(df_all_predictions) +
   geom_raster(aes(x = s1, y = s2, fill = median)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C", limits = median_limits) +
-  geom_point(data = coords, aes(x = s1, y = s2), color = "white", shape = 1, size = 1.5, alpha = 0.7) +
+  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.7) +
+  geom_point(data = coords_df, aes(x = s1, y = s2), color = "black", size = 1.2, alpha = 0.7) +
+  scale_fill_viridis_c(option = "C", limits = c(min_value, max_value), name = expression(NO[2])) +
+  facet_wrap(~ model, ncol = 3) +
   coord_sf() +
-  labs(title = "SPDE: Squared Median") +
-  theme_minimal()
-
-plot_median_KLE <- ggplot(df_regTPS_KLE) +
-  geom_raster(aes(x = s1, y = s2, fill = median)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C", limits = median_limits) +
-  geom_point(data = coords, aes(x = s1, y = s2), color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "KLE: Squared Median") +
-  theme_minimal()
-
-# Plotting the 97.5% Quantiles
-plot_q975_spde <- ggplot(df_spde) +
-  geom_raster(aes(x = s1, y = s2, fill = q975)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C", limits = q975_limits) +
-  geom_point(data = coords, aes(x = s1, y = s2), color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "SPDE: Squared 97.5% Quantile") +
-  theme_minimal()
-
-plot_q975_KLE <- ggplot(df_regTPS_KLE) +
-  geom_raster(aes(x = s1, y = s2, fill = q975)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.6) +
-  scale_fill_viridis_c(option = "C", limits = q975_limits) +
-  geom_point(data = coords, aes(x = s1, y = s2), color = "white", shape = 1, size = 1.5, alpha = 0.7) +
-  coord_sf() +
-  labs(title = "KLE: Squared 97.5% Quantile") +
-  theme_minimal()
-
-#========================================================
-# 5. Arrange the plots
-#========================================================
-grid.arrange(plot_q025_spde, plot_q025_KLE,
-             plot_median_spde, plot_median_KLE,
-             plot_q975_spde, plot_q975_KLE,
-             ncol = 2)
+  labs(title = "Posterior Predictive Median of NO₂",
+       subtitle = "Original NO₂ scale; observation error included",
+       x = NULL, y = NULL) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        strip.text = element_text(face = "bold", size = 14), panel.grid = element_blank())
 
 
 
+#===============================================================================
+# Save all posterior predictive results
+#===============================================================================
+posterior_predictive_results <- list(
+  # Posterior predictive draws on sqrt(NO2) scale
+  y_pred_spde_sqrt = y_pred_spde_sqrt,
+  y_pred_tps_sqrt  = y_pred_tps_sqrt,
+  pred_spnngp_sqrt = pred_spnngp_sqrt,
+  # Posterior predictive draws on original NO2 scale
+  NO2_pred_spde   = NO2_pred_spde,
+  NO2_pred_tps    = NO2_pred_tps,
+  NO2_pred_spnngp = NO2_pred_spnngp,
+  # Summary data frames
+  df_spde_pred    = df_spde_pred,
+  df_tps_pred     = df_tps_pred,
+  df_spnngp_pred  = df_spnngp_pred,
+  # Combined data frame
+  df_all_predictions = df_all_predictions,
+  # Prediction grid
+  grid_total = grid_total,
+  # Common color scale
+  min_value = min_value,
+  max_value = max_value,
+  # Metadata
+  burn_in = burn_in,
+  n_chains = n_chains
+)
+
+saveRDS(posterior_predictive_results, file = "posterior_predictive_NO2_three_models.RDS")
 
 
 
 
 
 
-# Load necessary libraries
-library(ggplot2)
+
+
 library(dplyr)
-library(tidyr) # For pivot_longer
+library(tidyr)
+library(ggplot2)
+
+#===============================================================================
+# 4. COMBINE ALL PREDICTIONS INTO A SINGLE LONG DATA FRAME
+#===============================================================================
+posterior_predictive_NO2 <- readRDS('posterior_predictive_NO2_three_models.RDS')
+df_spnngp_pred <- posterior_predictive_NO2$df_spnngp_pred
 
 
-#========================================================
-# 2. Combine and reshape the data into a long format
-#========================================================
-df_combined_long <- df_spde %>%
-  mutate(model = "SPDE") %>%
-  bind_rows(
-    df_regTPS_KLE %>%
-      mutate(model = "regTPS-KLE")
-  ) %>%
+# Add model identifier to individual prediction data frames
+df_spde_pred$Model   <- "SPDE"
+df_spnngp_pred$Model <- "spNNGP"
+df_tps_pred$Model    <- "regTPS-KLE"
+
+# Combine into one long-format data frame
+df_all_pred <- bind_rows(df_spde_pred, df_spnngp_pred, df_tps_pred) %>%
   pivot_longer(
-    cols = c(q025, median, q975),
-    names_to = "quantile_type",
-    values_to = "value"
+    cols = c("q025", "median", "q975"),
+    names_to = "Quantile",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    # Set model order across columns (Left to Right)
+    Model = factor(Model, levels = c("SPDE", "spNNGP", "regTPS-KLE")),
+    # Set quantile order across rows (Top to Bottom)
+    Quantile = factor(
+      Quantile,
+      levels = c("q025", "median", "q975"),
+      labels = c("Quantile 0.025", "Quantile 0.50 (Median)", "Quantile 0.975")
+    )
   )
 
-# Convert quantile_type to a factor with desired order for plotting
-df_combined_long$quantile_type <- factor(df_combined_long$quantile_type,
-                                         levels = c("q025", "median", "q975"),
-                                         labels = c("2.5% Quantile", "Median", "97.5% Quantile"))
+# Set common limits across all panels
+min_val <- min(df_all_pred$Value, na.rm = TRUE)
+max_val <- max(df_all_pred$Value, na.rm = TRUE)
 
-#========================================================
-# 3. Plot with a single ggplot call using facet_wrap
-#========================================================
-df_combined_long$model <- factor(df_combined_long$model, levels = c("SPDE", "regTPS-KLE"))
+#===============================================================================
+# 5. GENERATE FACETED MAP GRID
+#===============================================================================
 
-
-library(ggh4x)
-plot11 <- ggplot(df_combined_long) +
-  geom_raster(aes(x = s1, y = s2, fill = value)) +
-  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.7) +
-  geom_point(data = coords, aes(x = s1, y = s2),
-             color = "black", size = 1.5, alpha = 0.7) +
-  scale_fill_viridis_c(option = "C") +
+p_grid <- ggplot(df_all_pred) +
+  geom_raster(aes(x = s1, y = s2, fill = Value)) +
+  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.5) +
+  geom_point(data = coords_df, aes(x = s1, y = s2), color = "black", size = 0.8, alpha = 0.6) +
+  # scale_fill_viridis_c(
+  #   option = "C",
+  #   limits = c(min_val, max_val),
+  #   name = expression(NO[2])
+  # ) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1, limits = c(min_val, max_val), name = expression(NO[2])) +
+  # scale_fill_distiller(palette = "YlGnBu", direction = 1, limits = c(min_val, max_val), name = expression(NO[2])) + 
+  # scale_fill_distiller(palette = "PuBu", direction = 1, limits = c(min_val, max_val), name = expression(NO[2])) + 
   coord_sf() +
-  facet_grid(quantile_type ~ model) +
-  theme_grey() +
-  labs(
-    x = "Longitude",
-    y = "Latitude",
-    fill = expression(NO[2]~Values)
-  ) +
+  facet_grid(Quantile ~ Model) +
+  labs(x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
   theme(
     legend.title = element_text(size = 18), 
     legend.text  = element_text(size = 16), 
-    axis.title.x = element_text(size = 16),
-    axis.title.y = element_text(size = 16),
-    strip.text.x = element_text(size = 18),
-    strip.text.y = element_text(size = 18),
-    axis.text    = element_text(size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    strip.text.x = element_text(size = 16),
+    strip.text.y = element_text(size = 16),
+    axis.text    = element_text(size = 11),
     strip.background = element_rect(fill = "gray90")
-  ) +
-  force_panelsizes(rows = c(3, 3, 3),
-                   cols = c(4, 4, 4))
+  )
+
+# Display the plot
+print(p_grid)
 
 
-plot11
+# # Save as high-quality PDF
+# ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot14.pdf",
+#        plot = p_grid,        # Replace with your ggplot object name
+#        device = cairo_pdf,    # Good for embedding text as text
+#        width = 12,             # Width in inches
+#        height = 12,            # Height in inches
+#        dpi = 300              # Only affects raster elements, safe to keep high
+# )
+
+
+
+
+
+
+#=====================================
+# PLOT for the paper
+#=====================================
+posterior_predictive_NO2 <- readRDS('posterior_predictive_NO2_three_models.RDS')
+
+#---------------------------------------
+# Transform to original NO2 scale
+#---------------------------------------
+library(gridExtra)
+
+# p.y.0 is on sqrt(NO2) scale
+NO2_pred_spnngp <- posterior_predictive_NO2$NO2_pred_spnngp
+
+
+#---------------------------------------
+# Posterior predictive summaries
+#---------------------------------------
+spnngp_summary <- t(apply(NO2_pred_spnngp, 1, quantile, probs = c(0.025, 0.50, 0.975), na.rm = TRUE))
+colnames(spnngp_summary) <- c("q025", "median", "q975")
+
+
+df_spnngp_pred <- data.frame(s1 = grid_total$s1, s2 = grid_total$s2, q025 = spnngp_summary[, "q025"],
+                             median = spnngp_summary[, "median"], q975 = spnngp_summary[, "q975"])
+
+
+#===============================================================================
+# 4. CHECK THE THREE DATASETS
+#===============================================================================
+
+cat("\n========================================\n")
+cat("Prediction summary\n")
+cat("========================================\n")
+
+cat("SPDE:\n")
+print(summary(df_spde_pred$median))
+
+cat("\nregTPS-KLE:\n")
+print(summary(df_tps_pred$median))
+
+cat("\nspNNGP:\n")
+print(summary(df_spnngp_pred$median))
+
+
+#===============================================================================
+# 5. COMMON COLOR SCALE
+#===============================================================================
+#
+# Use ALL posterior predictive draws to determine a common range.
+#
+# This guarantees that the colors mean the same NO2 concentration in all maps.
+#
+#===============================================================================
+all_medians <- c(df_spde_pred$median, df_tps_pred$median, df_spnngp_pred$median)
+min_value <- min(all_medians, na.rm = TRUE)
+max_value <- max(all_medians, na.rm = TRUE)
+
+
+#===============================================================================
+# 6. COMMON MAP FUNCTION
+#===============================================================================
+make_prediction_map <- function(df, title, fill_label = expression(NO[2])) {
+  ggplot(df) + geom_raster(aes(x = s1, y = s2, fill = median)) +
+    geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.8) +
+    geom_point(data = coords_df, aes(x = s1, y = s2), color = "black", size = 1.5, alpha = 0.7) +
+    scale_fill_viridis_c(option = "C", limits = c(min_value, max_value), name = fill_label) +
+    coord_sf() + labs(title = title, x = NULL, y = NULL) +
+    theme_bw(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "right", panel.grid = element_blank())
+}
+
+
+#===============================================================================
+# 7. CREATE THE THREE POSTERIOR PREDICTIVE MAPS
+#===============================================================================
+plot_spde <- make_prediction_map(df_spde_pred, "SPDE")
+plot_tps <- make_prediction_map(df_tps_pred, "regTPS-KLE")
+plot_spnngp <- make_prediction_map(df_spnngp_pred,"spNNGP")
+
+
+#===============================================================================
+# 8. DISPLAY SIDE-BY-SIDE
+#===============================================================================
+grid.arrange(plot_spde, plot_tps, plot_spnngp, ncol = 3)
+
+
+#===============================================================================
+# 9. OPTIONAL: CREATE A SINGLE DATA FRAME FOR FURTHER COMPARISON
+#===============================================================================
+df_all_predictions <- rbind(data.frame(df_spde_pred, model = "SPDE"),
+                            data.frame(df_tps_pred,  model = "regTPS-KLE"),
+                            data.frame(df_spnngp_pred, model = "spNNGP"))
+
+
+#===============================================================================
+# 10. FACET VERSION
+#===============================================================================
+ggplot(df_all_predictions) +
+  geom_raster(aes(x = s1, y = s2, fill = median)) +
+  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.7) +
+  geom_point(data = coords_df, aes(x = s1, y = s2), color = "black", size = 1.2, alpha = 0.7) +
+  scale_fill_viridis_c(option = "C", limits = c(min_value, max_value), name = expression(NO[2])) +
+  facet_wrap(~ model, ncol = 3) +
+  coord_sf() +
+  labs(title = "Posterior Predictive Median of NO₂",
+       subtitle = "Original NO₂ scale; observation error included",
+       x = NULL, y = NULL) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        strip.text = element_text(face = "bold", size = 14), panel.grid = element_blank())
+
+
+
+#===============================================================================
+# Save all posterior predictive results
+#===============================================================================
+
+posterior_predictive_results <- list(
+  # Posterior predictive draws on sqrt(NO2) scale
+  y_pred_spde_sqrt = y_pred_spde_sqrt,
+  y_pred_tps_sqrt  = y_pred_tps_sqrt,
+  pred_spnngp_sqrt = pred_spnngp_sqrt,
+  # Posterior predictive draws on original NO2 scale
+  NO2_pred_spde   = NO2_pred_spde,
+  NO2_pred_tps    = NO2_pred_tps,
+  NO2_pred_spnngp = NO2_pred_spnngp,
+  # Summary data frames
+  df_spde_pred    = df_spde_pred,
+  df_tps_pred     = df_tps_pred,
+  df_spnngp_pred  = df_spnngp_pred,
+  # Combined data frame
+  df_all_predictions = df_all_predictions,
+  # Prediction grid
+  grid_total = grid_total,
+  # Common color scale
+  min_value = min_value,
+  max_value = max_value,
+  # Metadata
+  burn_in = burn_in,
+  n_chains = n_chains)
+
+saveRDS(posterior_predictive_results, file = "posterior_predictive_NO2_three_models.RDS")
+
+
+
+
+
+
+
+#=============================
+# COMBINE ALL PREDICTIONS 
+#=============================
+posterior_predictive_NO2 <- readRDS('posterior_predictive_NO2_three_models.RDS')
+
+
+# Add model identifier to individual prediction data frames
+df_spde_pred$Model   <- "SPDE"
+df_spnngp_pred$Model <- "spNNGP"
+df_tps_pred$Model    <- "regTPS-KLE"
+
+# Combine into one long-format data frame
+df_all_pred <- bind_rows(df_spde_pred, df_spnngp_pred, df_tps_pred) %>%
+  pivot_longer(
+    cols = c("q025", "median", "q975"),
+    names_to = "Quantile",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    # Set model order across columns (Left to Right)
+    Model = factor(Model, levels = c("SPDE", "spNNGP", "regTPS-KLE")),
+    # Set quantile order across rows (Top to Bottom)
+    Quantile = factor(
+      Quantile,
+      levels = c("q025", "median", "q975"),
+      labels = c("Quantile 0.025", "Quantile 0.50 (Median)", "Quantile 0.975")
+    )
+  )
+
+# Set common limits across all panels
+min_val <- min(df_all_pred$Value, na.rm = TRUE)
+max_val <- max(df_all_pred$Value, na.rm = TRUE)
+
+#===============================================================================
+# 5. GENERATE FACETED MAP GRID
+#===============================================================================
+library(sf)
+
+# =========================================================
+# 1. Keep only predictions inside Germany
+# =========================================================
+pred_sf <- st_as_sf(df_all_pred, coords = c("s1", "s2"), crs = st_crs(germany_border))
+
+pred_sf <- pred_sf[st_within(pred_sf, germany_border, sparse = FALSE)[, 1],]
+
+# Recover coordinates for plotting
+pred_df <- pred_sf %>%
+  mutate(s1 = st_coordinates(.)[, 1], s2 = st_coordinates(.)[, 2]) %>%
+  st_drop_geometry()
+
+
+# =========================================================
+# 2. Germany extent + small buffer
+# =========================================================
+germany_bbox <- st_bbox(germany_border)
+buffer <- 0.3
+
+
+# =========================================================
+# 3. Plot
+# =========================================================
+p_grid <- ggplot() +
+  
+  # -------------------------------------------------------
+# Predictions only inside Germany
+# -------------------------------------------------------
+geom_raster(data = pred_df, aes(x = s1, y = s2, fill = Value)) +
+  geom_sf(data = germany_border, fill = NA, color = "black", linewidth = 0.5) +
+  geom_point(data = coords_df, aes(x = s1, y = s2), color = "black", size = 0.8, alpha = 0.6) +
+  scale_fill_distiller(palette = "PuBu", direction = 1,
+                       limits = c(min_val, max_val),
+                       oob = scales::squish,
+                       name = expression(NO[2])) +
+  coord_sf(xlim = c(germany_bbox["xmin"] - buffer, germany_bbox["xmax"] + buffer),
+           ylim = c(germany_bbox["ymin"] - buffer, germany_bbox["ymax"] + buffer),
+           expand = FALSE) +
+  facet_grid(Quantile ~ Model) +
+  labs(x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(legend.title = element_text(size = 18),
+        legend.text  = element_text(size = 16),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        strip.text.x = element_text(size = 16),
+        strip.text.y = element_text(size = 16),
+        axis.text = element_text(size = 11),
+        strip.background = element_rect(
+          fill = "gray90"))
+
+
+print(p_grid)
 
 
 # Save as high-quality PDF
-ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot11.pdf",
-       plot = plot11,        # Replace with your ggplot object name
+ggsave(filename = "C:/Users/jcavi/OneDrive/Escritorio/KLE/real_application/outputs/plot14.pdf",
+       plot = p_grid,        # Replace with your ggplot object name
        device = cairo_pdf,    # Good for embedding text as text
        width = 12,             # Width in inches
        height = 12,            # Height in inches
        dpi = 300              # Only affects raster elements, safe to keep high
 )
+
+
